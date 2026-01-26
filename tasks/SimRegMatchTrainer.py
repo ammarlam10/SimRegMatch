@@ -204,7 +204,9 @@ class SimRegMatchTrainer(object):
                 loss_u = self.criterion_unlabel(v_mean.detach(), preds_s).sum(axis=1)
                 loss_u = (loss_u * mask).sum()/(int(mask.sum()))
                 
-                self.args.threshold = np.percentile(v_uncertainty.detach().cpu().numpy(), q=float(self.args.percentile))           
+                # Note: percentile arg is in [0,1] range (e.g., 0.95 = 95th percentile)
+                # np.percentile expects q in [0,100], so multiply by 100
+                self.args.threshold = np.percentile(v_uncertainty.detach().cpu().numpy(), q=float(self.args.percentile) * 100)           
                 self.writer.add_scalar(
                     'Threshold',
                     self.args.threshold,

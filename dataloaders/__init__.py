@@ -59,9 +59,15 @@ def compute_dem_stats(data_dir, df, num_samples=1000):
 
 
 def make_semi_loader(args, num_workers=12):
-    # Handle CSV filename - so2sat_pop uses simreg_ prefix
+    # Handle CSV filename - so2sat_pop uses simreg_ prefix and data source suffix
     if args.dataset.lower() == 'so2sat_pop':
-        csv_filename = 'simreg_so2sat_pop.csv'
+        data_source = getattr(args, 'data_source', 'sen2')  # default to sen2
+        if data_source == 'sen2':
+            csv_filename = 'simreg_so2sat_pop_sen2.csv'
+            print(f"Using Sentinel-2 satellite imagery (RGB bands)")
+        else:
+            csv_filename = 'simreg_so2sat_pop.csv'
+            print(f"Using DEM (elevation) data")
     else:
         csv_filename = f'{args.dataset}.csv'
     
@@ -107,14 +113,18 @@ def make_semi_loader(args, num_workers=12):
     elif args.dataset.lower() == 'so2sat_pop':
         LabeledDataset = So2Sat_POP
         UnlabeledDataset = So2Sat_POP_Unlabeled
-        # Compute DEM statistics from training data
-        dem_min, dem_max = compute_dem_stats(args.data_dir, df_train)
+        # Compute DEM statistics only for DEM data (not needed for Sentinel-2)
+        data_source = getattr(args, 'data_source', 'sen2')
+        if data_source == 'dem':
+            dem_min, dem_max = compute_dem_stats(args.data_dir, df_train)
+        else:
+            dem_min, dem_max = None, None  # Not needed for Sentinel-2
     else:
         LabeledDataset = AgeDB
         UnlabeledDataset = AgeDB_Unlabeled
         dem_min, dem_max = None, None  # Not used for AgeDB
 
-    # Create dataset kwargs (only pass dem stats for So2Sat_POP)
+    # Create dataset kwargs (only pass dem stats for So2Sat_POP with DEM data)
     if args.dataset.lower() == 'so2sat_pop':
         dataset_kwargs = {
             'dem_min': dem_min,

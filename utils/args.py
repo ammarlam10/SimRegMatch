@@ -12,6 +12,7 @@ def SimRegMatch_parser():
     parser.add_argument('--img_size', type=int, default=224, help='image size used in training')
     parser.add_argument('--normalize-labels', action='store_true', default=False, help='Normalize labels using mean/std from training data (recommended for large-scale targets like population)')
     parser.add_argument('--log-transform', action='store_true', default=False, help='Apply log1p transform to labels (recommended for highly skewed targets like population)')
+    parser.add_argument('--data-source', type=str, default='sen2', choices=['dem', 'sen2'], help='Data source for so2sat_pop: dem (elevation) or sen2 (Sentinel-2 satellite imagery)')
 
     # For model architecture
     parser.add_argument('--dropout', type=float, default=0.1)
@@ -19,7 +20,7 @@ def SimRegMatch_parser():
     
     # For uncertainty estimation
     parser.add_argument('--threshold', type=float, default=10)
-    parser.add_argument('--percentile', type=float, default=0.95)    
+    parser.add_argument('--percentile', type=float, default=0.95, help='Percentile for uncertainty threshold (0.95 = 95th percentile, filters top 5%% most uncertain)')    
     parser.add_argument('--iter-u', type=int, default=5)
     
     # For pseudo-label calibration

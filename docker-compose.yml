@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  simregmatch:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: simregmatch:latest
+    container_name: simregmatch
+    volumes:
+      - .:/workspace
+      - /work/ammar/sslrp/data:/workspace/data
+      - /work/ammar/sslrp/SimRegMatch/results:/workspace/results
+      - /work/ammar/sslrp/UCVME:/workspace/ucvme
+    working_dir: /workspace
+    stdin_open: true
+    tty: true
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    command: /bin/bash

@@ -68,7 +68,7 @@ class Bottleneck(nn.Module):
 
 class ResNet(nn.Module):
 
-    def __init__(self, block, layers, dropout=None):
+    def __init__(self, block, layers, dropout=None, use_softplus=False):
         self.inplanes = 64
         super(ResNet, self).__init__()
         self.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3, bias=False)
@@ -82,6 +82,11 @@ class ResNet(nn.Module):
         self.avgpool = nn.AvgPool2d(7, stride=1)
         self.linear = nn.Linear(512 * block.expansion, 1)
         self.dropout = nn.Dropout(p=dropout)
+        
+        # Use softplus for non-negative outputs (e.g., population prediction)
+        self.use_softplus = use_softplus
+        if use_softplus:
+            self.softplus = nn.Softplus()
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -124,9 +129,13 @@ class ResNet(nn.Module):
         
         x = self.dropout(x)
         x = self.linear(x)
+        
+        # Apply softplus for non-negative outputs if enabled
+        if self.use_softplus:
+            x = self.softplus(x)
 
         return x, encoding
 
 
-def resnet50(dropout):
-    return ResNet(Bottleneck, [3, 4, 6, 3], dropout)
+def resnet50(dropout, use_softplus=False):
+    return ResNet(Bottleneck, [3, 4, 6, 3], dropout, use_softplus=use_softplus)

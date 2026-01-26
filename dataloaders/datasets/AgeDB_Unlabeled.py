@@ -11,11 +11,13 @@ from dataloaders.datasets import RandAug
 
 
 class AgeDB_Unlabeled(Dataset):
-    def __init__(self, df, data_dir, img_size, split='train'):
+    def __init__(self, df, data_dir, img_size, split='train', label_mean=None, label_std=None):
         self.df = df
         self.data_dir = data_dir
         self.img_size = img_size
         self.split = split
+        self.label_mean = label_mean
+        self.label_std = label_std
 
     def __len__(self):
         return len(self.df)
@@ -34,6 +36,10 @@ class AgeDB_Unlabeled(Dataset):
             transforms.Normalize([.5, .5, .5], [.5, .5, .5])
         ])(strong_aug)
         label = np.asarray([row['age']]).astype('float32')
+        
+        # Normalize label if normalization stats are provided
+        if self.label_mean is not None and self.label_std is not None:
+            label = (label - self.label_mean) / self.label_std
 
         return {'weak': weak_aug.float(),
                 'strong': strong_aug.float(),
@@ -57,6 +63,6 @@ class AgeDB_Unlabeled(Dataset):
         return transform
 
     def get_strong(self, img):
-        rand_aug = RandAug.RandAugmentPC(n=2, m=10)
+        rand_aug = RandAug.RandAugmentPC(n=2, m=10, img_size=self.img_size, grayscale=False)
         img = rand_aug(img)
         return img

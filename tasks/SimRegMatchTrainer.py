@@ -13,8 +13,35 @@ import torch.nn.functional as F
 import torchvision.transforms as T
 from torch.utils.tensorboard import SummaryWriter
 
+
+class HuberLoss(nn.Module):
+    """
+    Custom Huber Loss implementation for older PyTorch versions.
+    Huber loss is L2 for small errors (< delta) and L1 for large errors (>= delta).
+    """
+    def __init__(self, delta=1.0, reduction='mean'):
+        super(HuberLoss, self).__init__()
+        self.delta = delta
+        self.reduction = reduction
+    
+    def forward(self, input, target):
+        abs_diff = torch.abs(input - target)
+        quadratic = torch.clamp(abs_diff, max=self.delta)
+        linear = abs_diff - quadratic
+        loss = 0.5 * quadratic ** 2 + self.delta * linear
+        
+        if self.reduction == 'mean':
+            return loss.mean()
+        elif self.reduction == 'sum':
+            return loss.sum()
+        elif self.reduction == 'none':
+            return loss
+        else:
+            return loss.mean()
+
 from dataloaders import make_semi_loader
 from models.resnet_proposed import resnet50
+from models.efficientnet_wrapper import efficientnet_b0
 
 from utils.saver import Saver
 from utils.tqdm_config import get_tqdm_config
@@ -36,7 +63,19 @@ class SimRegMatchTrainer(object):
         self.labeled_loader, self.unlabeled_loader, self.valid_loader, self.test_loader = \
             make_semi_loader(self.args, num_workers=0)
         
-        self.model = resnet50(dropout=self.args.dropout).to(self.args.cuda)
+        # Use EfficientNet-B0 for so2sat_pop dataset, ResNet50 for others
+        # For population prediction, use softplus to ensure non-negative outputs
+        if self.args.dataset.lower() == 'so2sat_pop':
+            self.model = efficientnet_b0(dropout=self.args.dropout, use_softplus=True).to(self.args.cuda)
+            print("Using EfficientNet-B0 model for so2sat_pop dataset with softplus activation")
+        else:
+            self.model = resnet50(dropout=self.args.dropout, use_softplus=False).to(self.args.cuda)
+            print(f"Using ResNet50 model for {self.args.dataset} dataset")
+        
+        # Wrap model with DataParallel if multiple GPUs are available
+        if torch.cuda.device_count() > 1:
+            print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
+            self.model = nn.DataParallel(self.model)
         
         if self.args.optimizer.lower() == 'adam':
             self.optimizer = torch.optim.Adam(self.model.parameters(),
@@ -53,10 +92,45 @@ class SimRegMatchTrainer(object):
         elif self.args.loss=='l1':
             self.criterion = nn.L1Loss().to(self.args.cuda)
             self.criterion_unlabel = nn.L1Loss(reduction='none').to(self.args.cuda)
+        elif self.args.loss=='huber':
+            # Huber loss: L2 for small errors, L1 for large errors
+            # delta controls the transition point between L2 and L1 behavior
+            delta = getattr(self.args, 'huber_delta', 1.0)
+            print(f"Using Huber loss with delta={delta}")
+            self.criterion = HuberLoss(delta=delta, reduction='mean').to(self.args.cuda)
+            self.criterion_unlabel = HuberLoss(delta=delta, reduction='none').to(self.args.cuda)
         
         self.args.best_valid_loss = np.inf
         self.args.best_valid_epoch = 0
         self.cnt_train, self.cnt_valid = 0, 0
+        
+        # Load checkpoint if resuming
+        if self.args.resume:
+            if os.path.isfile(self.args.resume):
+                print(f"Loading checkpoint from {self.args.resume}")
+                checkpoint = torch.load(self.args.resume, map_location=self.args.cuda)
+                # Handle DataParallel state_dict (keys have 'module.' prefix)
+                state_dict = checkpoint['model_state_dict']
+                # If model is wrapped in DataParallel but checkpoint wasn't, add 'module.' prefix
+                if isinstance(self.model, nn.DataParallel) and not any(k.startswith('module.') for k in state_dict.keys()):
+                    state_dict = {f'module.{k}': v for k, v in state_dict.items()}
+                # If model is not wrapped but checkpoint was, remove 'module.' prefix
+                elif not isinstance(self.model, nn.DataParallel) and any(k.startswith('module.') for k in state_dict.keys()):
+                    state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
+                self.model.load_state_dict(state_dict)
+                self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                self.args.best_valid_loss = checkpoint.get('best_valid_loss', np.inf)
+                self.args.best_valid_epoch = checkpoint.get('best_valid_epoch', 0)
+                self.cnt_train = checkpoint.get('cnt_train', 0)
+                self.cnt_valid = checkpoint.get('cnt_valid', 0)
+                # Update start_epoch from checkpoint if available
+                if 'epoch' in checkpoint:
+                    self.args.start_epoch = checkpoint['epoch'] + 1
+                print(f"Resumed from epoch {checkpoint.get('epoch', self.args.start_epoch)}")
+                print(f"Will continue from epoch {self.args.start_epoch}")
+                print(f"Best validation loss: {self.args.best_valid_loss:.4f} at epoch {self.args.best_valid_epoch}")
+            else:
+                print(f"Warning: Checkpoint file {self.args.resume} not found. Starting from scratch.")
 
     def train(self, epoch):
         self.model.train()
@@ -83,12 +157,13 @@ class SimRegMatchTrainer(object):
                 # Predict labeled examples 
                 preds_x, vecs_x = self.model(inputs_l)
 
-                # Predict strong-augmented examples 
+                # Predict strong-augmented examples (uncertainty estimation - no gradients needed)
                 preds_w, vecs_w = [], []
-                for _ in range(self.args.iter_u):
-                    tmp_preds, tmp_vecs = self.model(inputs_u)
-                    preds_w.append(tmp_preds.unsqueeze(-1))
-                    vecs_w.append(tmp_vecs.unsqueeze(-1))
+                with torch.no_grad():  # Don't track gradients for uncertainty estimation
+                    for _ in range(self.args.iter_u):
+                        tmp_preds, tmp_vecs = self.model(inputs_u)
+                        preds_w.append(tmp_preds.unsqueeze(-1))
+                        vecs_w.append(tmp_vecs.unsqueeze(-1))
                 
                 preds_w = torch.cat(preds_w, dim=-1)
                 vecs_w = torch.cat(vecs_w, dim=-1)
@@ -111,6 +186,9 @@ class SimRegMatchTrainer(object):
                 # similarity-based pseudo-label
                 v_similarity = similaritys @ labels_l
                 
+                # Clean up inputs_l and labels_l - no longer needed after similarity computation
+                del inputs_l, labels_l
+                
                 # pseudo-label calibration
                 v_mean = self.args.beta*v_mean + (1-self.args.beta)*v_similarity # beta*modelPL + (1-beta)*simPL
                 
@@ -118,12 +196,15 @@ class SimRegMatchTrainer(object):
                 v_uncertainty = torch.pow(torch.std(preds_w, axis=2), 2)
                 v_uncertainty = torch.sum(v_uncertainty, axis=1)
                 
+                # Clean up inputs_u and preds_w - no longer needed after uncertainty computation
+                del inputs_u, preds_w
+                
                 # pseudo-label filtering
                 mask = (v_uncertainty < self.args.threshold)
                 loss_u = self.criterion_unlabel(v_mean.detach(), preds_s).sum(axis=1)
                 loss_u = (loss_u * mask).sum()/(int(mask.sum()))
                 
-                self.args.threshold = np.percentile(v_uncertainty.detach().cpu().numpy(), q=self.args.percentile)           
+                self.args.threshold = np.percentile(v_uncertainty.detach().cpu().numpy(), q=float(self.args.percentile))           
                 self.writer.add_scalar(
                     'Threshold',
                     self.args.threshold,
@@ -135,8 +216,10 @@ class SimRegMatchTrainer(object):
                 
                 loss = loss_x + self.args.lambda_u*loss_u
 
-                del(inputs_s, inputs_u, preds_w, preds_s)
+                # Clean up memory more aggressively (inputs_u, preds_w, inputs_l, labels_l already deleted earlier)
+                del(inputs_s, preds_s, preds_x, vecs_x, vecs_w, similaritys, v_similarity, v_mean, v_uncertainty, mask)
                 gc.collect()
+                torch.cuda.empty_cache()
 
                 self.optimizer.zero_grad()
                 loss.backward()
@@ -166,39 +249,55 @@ class SimRegMatchTrainer(object):
         losses_t = 0.0
         
         total_steps = len(self.valid_loader.dataset) // self.args.batch_size + 1
-        with tqdm(**get_tqdm_config(total=total_steps,
-                                    leave=True, color='blue')) as pbar:
-            for idx, samples in enumerate(self.valid_loader):
-                inputs_l = samples['input'].to(self.args.cuda)
-                labels_l = samples['label'].to(self.args.cuda)
-                
-                preds, _ = self.model(inputs_l)
-                loss = self.criterion(preds, labels_l)
-                                
-                losses_t += loss.item()
-                
-                if idx == 0:
-                    labels_total = labels_l.detach().cpu()
-                    preds_total = preds.detach().cpu()
-                else:
-                    labels_total = torch.cat((labels_total, labels_l.detach().cpu()), dim=0)
-                    preds_total = torch.cat((preds_total,
-                                             preds.detach().cpu()), dim=0)
+        with torch.no_grad():  # Don't track gradients during validation
+            with tqdm(**get_tqdm_config(total=total_steps,
+                                        leave=True, color='blue')) as pbar:
+                for idx, samples in enumerate(self.valid_loader):
+                    inputs_l = samples['input'].to(self.args.cuda)
+                    labels_l = samples['label'].to(self.args.cuda)
+                    
+                    preds, _ = self.model(inputs_l)
+                    loss = self.criterion(preds, labels_l)
+                                    
+                    losses_t += loss.item()
+                    
+                    # Denormalize predictions and labels for metrics if normalization was used
+                    labels_denorm = labels_l.detach().cpu()
+                    preds_denorm = preds.detach().cpu()
+                    if self.args.label_mean is not None and self.args.label_std is not None:
+                        labels_denorm = labels_denorm * self.args.label_std + self.args.label_mean
+                        preds_denorm = preds_denorm * self.args.label_std + self.args.label_mean
+                    
+                    # Reverse log-transform if it was applied
+                    if self.args.log_transform:
+                        labels_denorm = torch.expm1(labels_denorm)  # exp(x) - 1
+                        preds_denorm = torch.expm1(preds_denorm)
+                    
+                    if idx == 0:
+                        labels_total = labels_denorm
+                        preds_total = preds_denorm
+                    else:
+                        labels_total = torch.cat((labels_total, labels_denorm), dim=0)
+                        preds_total = torch.cat((preds_total, preds_denorm), dim=0)
 
-                r2, mae, rmse = self.regression_metrics(labels_total, preds_total)
-                self.writer.add_scalars(
-                    'Validation steps',
-                    {'Loss': losses_t/(idx+1),
-                     'MAE': mae,
-                     'RMSE': rmse,
-                     'R2': r2},
-                    global_step=self.cnt_valid
-                )
-                self.cnt_valid += 1
+                    r2, mae, rmse = self.regression_metrics(labels_total, preds_total)
+                    self.writer.add_scalars(
+                        'Validation steps',
+                        {'Loss': losses_t/(idx+1),
+                         'MAE': mae,
+                         'RMSE': rmse,
+                         'R2': r2},
+                        global_step=self.cnt_valid
+                    )
+                    self.cnt_valid += 1
 
-                desc = "%-7s(%5d/%5d) Loss: %.4f| R^2: %.4f| MAE: %.4f| RMSE: %.4f "%("Valid", idx, total_steps, losses_t/(idx+1), r2, mae, rmse)
-                pbar.set_description(desc)
-                pbar.update(1)
+                    # Clean up GPU memory after each batch
+                    del inputs_l, labels_l, preds, loss
+                    torch.cuda.empty_cache()
+
+                    desc = "%-7s(%5d/%5d) Loss: %.4f| R^2: %.4f| MAE: %.4f| RMSE: %.4f "%("Valid", idx, total_steps, losses_t/(idx+1), r2, mae, rmse)
+                    pbar.set_description(desc)
+                    pbar.update(1)
 
             desc = "%-7s(%5d/%5d) Loss: %.4f| R^2: %.4f| MAE: %.4f| RMSE: %.4f "%("Valid", epoch, self.args.epochs, losses_t/(idx+1), r2, mae, rmse)
             pbar.set_description(desc)
@@ -219,8 +318,28 @@ class SimRegMatchTrainer(object):
                 df.columns = ['Real', 'Pred']
                 
                 df.to_csv(os.path.join(self.result_dir, f'valid_{str(epoch)}.csv'), index=False)
-                torch.save(self.model.state_dict(),
+                
+                # Save best model state dict (for inference)
+                # Remove 'module.' prefix if model is wrapped in DataParallel
+                model_state = self.model.state_dict()
+                if isinstance(self.model, nn.DataParallel):
+                    model_state = {k.replace('module.', ''): v for k, v in model_state.items()}
+                torch.save(model_state,
                     os.path.join(self.experiment_dir, 'best_model.pth'))
+                
+                # Save full checkpoint (for resuming)
+                # Reuse model_state from above (already has 'module.' prefix removed if needed)
+                checkpoint = {
+                    'epoch': epoch,
+                    'model_state_dict': model_state,
+                    'optimizer_state_dict': self.optimizer.state_dict(),
+                    'best_valid_loss': self.args.best_valid_loss,
+                    'best_valid_epoch': self.args.best_valid_epoch,
+                    'cnt_train': self.cnt_train,
+                    'cnt_valid': self.cnt_valid,
+                }
+                torch.save(checkpoint,
+                    os.path.join(self.experiment_dir, 'checkpoint.pth'))
                 
                 self.saver.save_experiment_config(self.args)
 
@@ -232,29 +351,45 @@ class SimRegMatchTrainer(object):
         losses_t = 0.0
         
         total_steps = len(self.test_loader.dataset) // self.args.batch_size +1
-        with tqdm(**get_tqdm_config(total=total_steps,
-                                    leave=True, color='red')) as pbar:
-            for idx, samples in enumerate(self.test_loader):
-                inputs_l = samples['input'].to(self.args.cuda)
-                labels_l = samples['label'].to(self.args.cuda)
-                
-                preds, _ = self.model(inputs_l)
-                loss = self.criterion(preds, labels_l)
-                                
-                losses_t += loss.item()
-                
-                if idx == 0:
-                    labels_total = labels_l.detach().cpu()
-                    preds_total = preds.detach().cpu()
-                else:
-                    labels_total = torch.cat((labels_total, labels_l.detach().cpu()), dim=0)
-                    preds_total = torch.cat((preds_total,
-                                             preds.detach().cpu()), dim=0)
+        with torch.no_grad():  # Don't track gradients during inference
+            with tqdm(**get_tqdm_config(total=total_steps,
+                                        leave=True, color='red')) as pbar:
+                for idx, samples in enumerate(self.test_loader):
+                    inputs_l = samples['input'].to(self.args.cuda)
+                    labels_l = samples['label'].to(self.args.cuda)
+                    
+                    preds, _ = self.model(inputs_l)
+                    loss = self.criterion(preds, labels_l)
+                                    
+                    losses_t += loss.item()
+                    
+                    # Denormalize predictions and labels for metrics if normalization was used
+                    labels_denorm = labels_l.detach().cpu()
+                    preds_denorm = preds.detach().cpu()
+                    if self.args.label_mean is not None and self.args.label_std is not None:
+                        labels_denorm = labels_denorm * self.args.label_std + self.args.label_mean
+                        preds_denorm = preds_denorm * self.args.label_std + self.args.label_mean
+                    
+                    # Reverse log-transform if it was applied
+                    if self.args.log_transform:
+                        labels_denorm = torch.expm1(labels_denorm)  # exp(x) - 1
+                        preds_denorm = torch.expm1(preds_denorm)
+                    
+                    if idx == 0:
+                        labels_total = labels_denorm
+                        preds_total = preds_denorm
+                    else:
+                        labels_total = torch.cat((labels_total, labels_denorm), dim=0)
+                        preds_total = torch.cat((preds_total, preds_denorm), dim=0)
 
-                r2, mae, rmse = self.regression_metrics(labels_total, preds_total)
-                desc = "%-7s(%5d/%5d) Loss: %.4f| R^2: %.4f| MAE: %.4f| RMSE: %.4f "%("Test", idx, total_steps, losses_t/(idx+1), r2, mae, rmse)
-                pbar.set_description(desc)
-                pbar.update(1)
+                    # Clean up GPU memory after each batch
+                    del inputs_l, labels_l, preds, loss
+                    torch.cuda.empty_cache()
+
+                    r2, mae, rmse = self.regression_metrics(labels_total, preds_total)
+                    desc = "%-7s(%5d/%5d) Loss: %.4f| R^2: %.4f| MAE: %.4f| RMSE: %.4f "%("Test", idx, total_steps, losses_t/(idx+1), r2, mae, rmse)
+                    pbar.set_description(desc)
+                    pbar.update(1)
 
             desc = "%-7s(%5d/%5d) Loss: %.4f| R^2: %.4f| MAE: %.4f| RMSE: %.4f "%("Test", epoch, self.args.epochs, losses_t/(idx+1), r2, mae, rmse)
             pbar.set_description(desc)

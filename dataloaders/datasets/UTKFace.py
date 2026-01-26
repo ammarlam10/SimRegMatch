@@ -8,7 +8,7 @@ from torch.utils.data import Dataset
 import torchvision.transforms as transforms
 
 
-class AgeDB(Dataset):
+class UTKFace(Dataset):
     def __init__(self, df, data_dir, img_size, split='train', label_mean=None, label_std=None):
         self.df = df
         self.data_dir = data_dir
@@ -24,7 +24,10 @@ class AgeDB(Dataset):
         index = index % len(self.df)
         row = self.df.iloc[index]
 
-        img = Image.open(os.path.join(self.data_dir, row['path'])).convert('RGB')
+        # UTKFace images are in a subdirectory
+        # Path structure: data_dir/UTKFace_all/utkface_aligned_cropped/UTKFace/filename.jpg
+        img_path = os.path.join(self.data_dir, 'UTKFace_all', 'utkface_aligned_cropped', 'UTKFace', row['path'])
+        img = Image.open(img_path).convert('RGB')
         transform = self.get_transform()
         img = transform(img)
         

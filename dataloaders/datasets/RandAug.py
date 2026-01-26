@@ -105,7 +105,7 @@ def SolarizeAdd(img, v, max_v, bias=0, threshold=128):
     v = _int_parameter(v, max_v) + bias
     if random.random() < 0.5:
         v = -v
-    img_np = np.array(img).astype(np.int)
+    img_np = np.array(img).astype(int)
     img_np = img_np + v
     img_np = np.clip(img_np, 0, 255)
     img_np = img_np.astype(np.uint8)
@@ -156,6 +156,24 @@ def fixmatch_augment_pool():
     return augs
 
 
+def grayscale_augment_pool():
+    """
+    Augmentation pool for grayscale/DEM images.
+    Excludes color-related augmentations (Brightness, Color, Contrast, AutoContrast)
+    that don't make sense for single-channel images converted to grayscale RGB.
+    """
+    augs = [(Identity, None, None),
+            (Equalize, None, None),
+            (Posterize, 4, 4),
+            (Rotate, 30, 0),
+            (Sharpness, 0.9, 0.05),
+            (ShearX, 0.3, 0),
+            (ShearY, 0.3, 0),
+            (TranslateX, 0.3, 0),
+            (TranslateY, 0.3, 0)]
+    return augs
+
+
 def my_augment_pool():
     # Test
     augs = [(AutoContrast, None, None),
@@ -177,13 +195,33 @@ def my_augment_pool():
     return augs
 
 
+def my_grayscale_augment_pool():
+    """
+    Augmentation pool for grayscale/DEM images.
+    Excludes color-related augmentations that don't make sense for grayscale images.
+    """
+    augs = [(Identity, None, None),
+            (Cutout, 0.2, 0),
+            (Equalize, None, None),
+            (Posterize, 4, 4),
+            (Rotate, 30, 0),
+            (Sharpness, 1.8, 0.1),
+            (ShearX, 0.3, 0),
+            (ShearY, 0.3, 0),
+            (TranslateX, 0.45, 0),
+            (TranslateY, 0.45, 0)]
+    return augs
+
+
 class RandAugmentPC(object):
-    def __init__(self, n, m):
+    def __init__(self, n, m, img_size=32, grayscale=False):
         assert n >= 1
         assert 1 <= m <= 10
         self.n = n
         self.m = m
-        self.augment_pool = my_augment_pool()
+        self.img_size = img_size
+        self.cutout_size = int(img_size * 0.5)
+        self.augment_pool = my_grayscale_augment_pool() if grayscale else my_augment_pool()
 
     def __call__(self, img):
         ops = random.choices(self.augment_pool, k=self.n)
@@ -191,17 +229,19 @@ class RandAugmentPC(object):
             prob = np.random.uniform(0.2, 0.8)
             if random.random() + prob >= 1:
                 img = op(img, v=self.m, max_v=max_v, bias=bias)
-        img = CutoutAbs(img, int(32*0.5))
+        img = CutoutAbs(img, self.cutout_size)
         return img
 
 
 class RandAugmentMC(object):
-    def __init__(self, n, m):
+    def __init__(self, n, m, img_size=32, grayscale=False):
         assert n >= 1
         assert 1 <= m <= 10
         self.n = n
         self.m = m
-        self.augment_pool = fixmatch_augment_pool()
+        self.img_size = img_size
+        self.cutout_size = int(img_size * 0.5)
+        self.augment_pool = grayscale_augment_pool() if grayscale else fixmatch_augment_pool()
 
     def __call__(self, img):
         ops = random.choices(self.augment_pool, k=self.n)
@@ -209,5 +249,5 @@ class RandAugmentMC(object):
             v = np.random.randint(1, self.m)
             if random.random() < 0.5:
                 img = op(img, v=v, max_v=max_v, bias=bias)
-        img = CutoutAbs(img, int(32*0.5))
+        img = CutoutAbs(img, self.cutout_size)
         return img

@@ -1,45 +1,165 @@
 import os
 import pandas as pd
+import numpy as np
 
+from PIL import Image
 from torch.utils.data import DataLoader
 from dataloaders.datasets.AgeDB import AgeDB
 from dataloaders.datasets.AgeDB_Unlabeled import AgeDB_Unlabeled
+from dataloaders.datasets.UTKFace import UTKFace
+from dataloaders.datasets.UTKFace_Unlabeled import UTKFace_Unlabeled
+from dataloaders.datasets.So2Sat_POP import So2Sat_POP
+from dataloaders.datasets.So2Sat_POP_Unlabeled import So2Sat_POP_Unlabeled
+
+
+def compute_dem_stats(data_dir, df, num_samples=1000):
+    """
+    Compute DEM min/max statistics from a sample of images.
+    
+    Args:
+        data_dir: Base data directory
+        df: DataFrame with image paths
+        num_samples: Number of images to sample for statistics
+    
+    Returns:
+        (dem_min, dem_max) tuple
+    """
+    import random
+    
+    # Sample a subset of images for efficiency
+    sample_size = min(num_samples, len(df))
+    sample_paths = random.sample(list(df['path'].values), sample_size)
+    
+    all_mins, all_maxs = [], []
+    for path in sample_paths:
+        img_path = os.path.join(data_dir, 'So2Sat_POP', path)
+        try:
+            img = Image.open(img_path)
+            img_array = np.array(img, dtype=np.float32)
+            all_mins.append(img_array.min())
+            all_maxs.append(img_array.max())
+        except Exception:
+            continue
+    
+    if len(all_mins) == 0:
+        # Fallback to default values
+        return -2.0, 2.0
+    
+    # Use percentiles to be robust to outliers
+    dem_min = float(np.percentile(all_mins, 1))  # 1st percentile
+    dem_max = float(np.percentile(all_maxs, 99))  # 99th percentile
+    
+    # Add small margin
+    margin = (dem_max - dem_min) * 0.05
+    dem_min -= margin
+    dem_max += margin
+    
+    print(f"DEM statistics computed from {len(all_mins)} images: min={dem_min:.4f}, max={dem_max:.4f}")
+    return dem_min, dem_max
+
 
 def make_semi_loader(args, num_workers=12):
-    df = pd.read_csv(os.path.join(args.data_dir, f'{args.dataset}.csv'))
+    # Handle CSV filename - so2sat_pop uses simreg_ prefix
+    if args.dataset.lower() == 'so2sat_pop':
+        csv_filename = 'simreg_so2sat_pop.csv'
+    else:
+        csv_filename = f'{args.dataset}.csv'
     
-    df_train, df_val, df_test = df[df['split'] == 'train'], df[df['split'] == 'val'], df[df['split'] == 'test']
+    df = pd.read_csv(os.path.join(args.data_dir, csv_filename))
+    
+    # Apply log-transform to labels if enabled (before any splits)
+    if args.log_transform:
+        original_range = (df['age'].min(), df['age'].max())
+        df['age'] = np.log1p(df['age'])  # log(1 + x) to handle zeros
+        transformed_range = (df['age'].min(), df['age'].max())
+        print(f"Log-transform applied: range [{original_range[0]:.2f}, {original_range[1]:.2f}] -> [{transformed_range[0]:.4f}, {transformed_range[1]:.4f}]")
+    
+    df_train, df_val, df_test = df[df['split'] == 'train'].copy(), df[df['split'] == 'val'].copy(), df[df['split'] == 'test'].copy()
     
     df_train = make_balanced_unlabeled(df_train, args)
     df_labeled, df_unlabeled = df_train[df_train['split_train']=='labeled'], df_train[df_train['split_train']=='unlabeled']
     df_labeled = make_reduced(df_labeled, args)
     df_labeled = df_labeled[df_labeled['split_train_reduced']=='use']
 
-    labeled_set = AgeDB(data_dir=args.data_dir,
+    # Compute label normalization statistics from training data only (if enabled)
+    label_mean = None
+    label_std = None
+    if args.normalize_labels:
+        label_mean = float(df_labeled['age'].mean())
+        label_std = float(df_labeled['age'].std())
+        # Avoid division by zero
+        if label_std < 1e-6:
+            label_std = 1.0
+        print(f"Label normalization enabled: mean={label_mean:.2f}, std={label_std:.2f}")
+        print(f"Label range: [{df_labeled['age'].min():.2f}, {df_labeled['age'].max():.2f}]")
+    else:
+        print("Label normalization disabled (using raw labels)")
+
+    # Store normalization stats in args for later use
+    args.label_mean = label_mean
+    args.label_std = label_std
+
+    # Select dataset class based on dataset name
+    if args.dataset.lower() == 'utkface':
+        LabeledDataset = UTKFace
+        UnlabeledDataset = UTKFace_Unlabeled
+        dem_min, dem_max = None, None  # Not used for UTKFace
+    elif args.dataset.lower() == 'so2sat_pop':
+        LabeledDataset = So2Sat_POP
+        UnlabeledDataset = So2Sat_POP_Unlabeled
+        # Compute DEM statistics from training data
+        dem_min, dem_max = compute_dem_stats(args.data_dir, df_train)
+    else:
+        LabeledDataset = AgeDB
+        UnlabeledDataset = AgeDB_Unlabeled
+        dem_min, dem_max = None, None  # Not used for AgeDB
+
+    # Create dataset kwargs (only pass dem stats for So2Sat_POP)
+    if args.dataset.lower() == 'so2sat_pop':
+        dataset_kwargs = {
+            'dem_min': dem_min,
+            'dem_max': dem_max,
+        }
+    else:
+        dataset_kwargs = {}
+
+    labeled_set = LabeledDataset(data_dir=args.data_dir,
                         df = df_labeled,
                         img_size=args.img_size,
-                        split='train'
+                        split='train',
+                        label_mean=label_mean,
+                        label_std=label_std,
+                        **dataset_kwargs
                         )
     labeled_loader = DataLoader(labeled_set, batch_size=args.batch_size, shuffle=True, num_workers=num_workers, drop_last=True)
 
-    unlabeled_set = AgeDB_Unlabeled(data_dir=args.data_dir,
+    unlabeled_set = UnlabeledDataset(data_dir=args.data_dir,
                         df = df_unlabeled,
                         img_size=args.img_size,
-                        split='train'
+                        split='train',
+                        label_mean=label_mean,
+                        label_std=label_std,
+                        **dataset_kwargs
                         )
     unlabeled_loader = DataLoader(unlabeled_set, batch_size=args.batch_size, shuffle=True, num_workers=num_workers, drop_last=True)
     
-    valid_set = AgeDB(data_dir=args.data_dir,
+    valid_set = LabeledDataset(data_dir=args.data_dir,
                         df = df_val,
                         img_size=args.img_size,
-                        split='valid'
+                        split='valid',
+                        label_mean=label_mean,
+                        label_std=label_std,
+                        **dataset_kwargs
                         )
     valid_loader = DataLoader(valid_set, batch_size=args.batch_size, shuffle=False, num_workers=num_workers, drop_last=False)
         
-    test_set = AgeDB(data_dir=args.data_dir,
+    test_set = LabeledDataset(data_dir=args.data_dir,
                         df = df_test,
                         img_size=args.img_size,
-                        split='test'
+                        split='test',
+                        label_mean=label_mean,
+                        label_std=label_std,
+                        **dataset_kwargs
                         )
     test_loader = DataLoader(test_set, batch_size=args.batch_size, shuffle=False, num_workers=num_workers, drop_last=False)
     return labeled_loader, unlabeled_loader, valid_loader, test_loader
@@ -49,15 +169,91 @@ def make_balanced_unlabeled(data, args):
     import random
     random.seed(args.seed)
     
+    # Get actual age range from data instead of hardcoded 0-100
+    min_age = int(data['age'].min())
+    max_age = int(data['age'].max())
+    unique_values = data['age'].nunique()
+    
+    # For high-cardinality targets (like population data), use stratified binning
+    # Threshold: if more than 1000 unique values, use stratified binning
+    HIGH_CARDINALITY_THRESHOLD = 1000
+    NUM_BINS = 100
+    
     l_set, u_set = [], []
-    for v in range(100):
-        curr_df = data[data['age']==v]
-        curr_data = curr_df['path'].values
-        random.shuffle(curr_data)
+    
+    if unique_values > HIGH_CARDINALITY_THRESHOLD:
+        # STRATIFIED: Use log-spaced bins for skewed data
+        # This ensures better coverage of the full distribution
+        print(f"High-cardinality target detected ({unique_values} unique values). Using STRATIFIED sampling.")
         
-        curr_size = len(curr_data) // 2
-        l_set += list(curr_data[:curr_size])
-        u_set += list(curr_data[curr_size:])
+        # Separate zero values (common in population data)
+        zero_mask = data['age'] == 0
+        zero_data = data[zero_mask]
+        nonzero_data = data[~zero_mask]
+        
+        # Handle zero-valued samples separately
+        if len(zero_data) > 0:
+            zero_paths = list(zero_data['path'].values)
+            random.shuffle(zero_paths)
+            split_point = len(zero_paths) // 2
+            l_set += zero_paths[:split_point]
+            u_set += zero_paths[split_point:]
+            print(f"  Zero-value samples: {len(zero_data)} (split 50/50)")
+        
+        # For non-zero values, use log-spaced bins for better coverage
+        if len(nonzero_data) > 0:
+            log_values = np.log1p(nonzero_data['age'].values)
+            
+            # Create bins based on log-transformed values (better for skewed data)
+            percentiles = np.linspace(0, 100, NUM_BINS + 1)
+            log_bins = np.percentile(log_values, percentiles)
+            log_bins = np.unique(log_bins)
+            
+            if len(log_bins) >= 2:
+                nonzero_data = nonzero_data.copy()
+                nonzero_data['log_age'] = log_values
+                nonzero_data['age_bin'] = pd.cut(nonzero_data['log_age'], bins=log_bins, 
+                                                  include_lowest=True, duplicates='drop')
+                
+                # Split within each bin (50/50 labeled/unlabeled)
+                for bin_label in nonzero_data['age_bin'].dropna().unique():
+                    curr_df = nonzero_data[nonzero_data['age_bin'] == bin_label]
+                    curr_data = list(curr_df['path'].values)
+                    random.shuffle(curr_data)
+                    
+                    curr_size = len(curr_data) // 2
+                    l_set += curr_data[:curr_size]
+                    u_set += curr_data[curr_size:]
+                
+                # Handle any samples that didn't get binned
+                binned_paths = set(l_set + u_set)
+                unbinned = nonzero_data[~nonzero_data['path'].isin(binned_paths)]
+                if len(unbinned) > 0:
+                    unbinned_paths = list(unbinned['path'].values)
+                    random.shuffle(unbinned_paths)
+                    split_point = len(unbinned_paths) // 2
+                    l_set += unbinned_paths[:split_point]
+                    u_set += unbinned_paths[split_point:]
+            else:
+                # Fallback: simple random split
+                nonzero_paths = list(nonzero_data['path'].values)
+                random.shuffle(nonzero_paths)
+                split_point = len(nonzero_paths) // 2
+                l_set += nonzero_paths[:split_point]
+                u_set += nonzero_paths[split_point:]
+            
+            print(f"  Non-zero samples: {len(nonzero_data)} (stratified by log-value)")
+    else:
+        # Original exact-value matching strategy (for age datasets like UTKFace)
+        age_range = range(min_age, max_age + 1)
+        for v in age_range:
+            curr_df = data[data['age']==v]
+            curr_data = list(curr_df['path'].values)
+            random.shuffle(curr_data)
+            
+            curr_size = len(curr_data) // 2
+            l_set += curr_data[:curr_size]
+            u_set += curr_data[curr_size:]
     
     print(f"Labeled Data: {len(l_set)} | Unlabeled Data: {len(u_set)}")
     
@@ -74,15 +270,90 @@ def make_reduced(data, args):
     import random
     random.seed(args.seed)
     
+    # Get actual age range from data instead of hardcoded 0-100
+    min_age = int(data['age'].min())
+    max_age = int(data['age'].max())
+    unique_values = data['age'].nunique()
+    
+    # For high-cardinality targets, use stratified binning strategy
+    HIGH_CARDINALITY_THRESHOLD = 1000
+    NUM_BINS = 100
+    
     use_set, not_set = [], []
-    for v in range(100):
-        curr_df = data[data['age']==v]
-        curr_data = curr_df['path'].values
-        random.shuffle(curr_data)
+    
+    if unique_values > HIGH_CARDINALITY_THRESHOLD:
+        # STRATIFIED: Use log-spaced bins for skewed data
+        print(f"Using stratified reduction with labeled_ratio={args.labeled_ratio}")
         
-        curr_size = int(len(curr_data) * args.labeled_ratio)
-        use_set += list(curr_data[:curr_size])
-        not_set += list(curr_data[curr_size:])
+        # Separate zero values (common in population data)
+        zero_mask = data['age'] == 0
+        zero_data = data[zero_mask]
+        nonzero_data = data[~zero_mask]
+        
+        # Handle zero-valued samples separately
+        if len(zero_data) > 0:
+            zero_paths = list(zero_data['path'].values)
+            random.shuffle(zero_paths)
+            curr_size = max(1, int(len(zero_paths) * args.labeled_ratio))
+            use_set += zero_paths[:curr_size]
+            not_set += zero_paths[curr_size:]
+            print(f"  Zero-value: using {curr_size}/{len(zero_paths)}")
+        
+        # For non-zero values, use log-spaced bins for better coverage
+        if len(nonzero_data) > 0:
+            log_values = np.log1p(nonzero_data['age'].values)
+            
+            # Create bins based on log-transformed values
+            percentiles = np.linspace(0, 100, NUM_BINS + 1)
+            log_bins = np.percentile(log_values, percentiles)
+            log_bins = np.unique(log_bins)
+            
+            if len(log_bins) >= 2:
+                nonzero_data = nonzero_data.copy()
+                nonzero_data['log_age'] = log_values
+                nonzero_data['age_bin'] = pd.cut(nonzero_data['log_age'], bins=log_bins,
+                                                  include_lowest=True, duplicates='drop')
+                
+                # Split within each bin according to labeled_ratio
+                for bin_label in nonzero_data['age_bin'].dropna().unique():
+                    curr_df = nonzero_data[nonzero_data['age_bin'] == bin_label]
+                    curr_data = list(curr_df['path'].values)
+                    random.shuffle(curr_data)
+                    
+                    curr_size = max(1, int(len(curr_data) * args.labeled_ratio))
+                    use_set += curr_data[:curr_size]
+                    not_set += curr_data[curr_size:]
+                
+                # Handle any samples that didn't get binned
+                binned_paths = set(use_set + not_set)
+                unbinned = nonzero_data[~nonzero_data['path'].isin(binned_paths)]
+                if len(unbinned) > 0:
+                    unbinned_paths = list(unbinned['path'].values)
+                    random.shuffle(unbinned_paths)
+                    split_point = max(1, int(len(unbinned_paths) * args.labeled_ratio))
+                    use_set += unbinned_paths[:split_point]
+                    not_set += unbinned_paths[split_point:]
+            else:
+                # Fallback: simple random split
+                nonzero_paths = list(nonzero_data['path'].values)
+                random.shuffle(nonzero_paths)
+                split_point = max(1, int(len(nonzero_paths) * args.labeled_ratio))
+                use_set += nonzero_paths[:split_point]
+                not_set += nonzero_paths[split_point:]
+            
+            nonzero_used = len([p for p in use_set if p in set(nonzero_data['path'].values)])
+            print(f"  Non-zero: using {nonzero_used}/{len(nonzero_data)}")
+    else:
+        # Original exact-value matching strategy (for age datasets like UTKFace)
+        age_range = range(min_age, max_age + 1)
+        for v in age_range:
+            curr_df = data[data['age']==v]
+            curr_data = list(curr_df['path'].values)
+            random.shuffle(curr_data)
+            
+            curr_size = int(len(curr_data) * args.labeled_ratio)
+            use_set += curr_data[:curr_size]
+            not_set += curr_data[curr_size:]
     
     print(f"Using Data: {len(use_set)} | Not using Data: {len(not_set)}")
     

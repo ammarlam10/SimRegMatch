@@ -1,6 +1,8 @@
 import os
 import pandas as pd
 import numpy as np
+import torch
+import torchvision.transforms as transforms
 
 from PIL import Image
 from torch.utils.data import DataLoader
@@ -10,6 +12,7 @@ from dataloaders.datasets.UTKFace import UTKFace
 from dataloaders.datasets.UTKFace_Unlabeled import UTKFace_Unlabeled
 from dataloaders.datasets.So2Sat_POP import So2Sat_POP
 from dataloaders.datasets.So2Sat_POP_Unlabeled import So2Sat_POP_Unlabeled
+from dataloaders.datasets.CachedDataset import CachedDataset
 
 
 def compute_dem_stats(data_dir, df, num_samples=1000):
@@ -58,7 +61,137 @@ def compute_dem_stats(data_dir, df, num_samples=1000):
     return dem_min, dem_max
 
 
-def make_semi_loader(args, num_workers=12):
+def compute_utkface_img_stats(data_dir, df, img_size=224, num_samples=1000, seed=42):
+    """
+    Compute mean and std for UTKFACE images from the dataset.
+    Similar to utils.get_mean_and_std but for UTKFACE dataset structure.
+    
+    Args:
+        data_dir: Base data directory
+        df: DataFrame with image paths (should be train split)
+        img_size: Target image size
+        num_samples: Number of images to sample for statistics
+        seed: Random seed
+    
+    Returns:
+        (mean, std) tuple, each is a list of 3 values for RGB channels
+    """
+    import random
+    import torch
+    random.seed(seed)
+    
+    # Sample a subset of images for efficiency
+    sample_size = min(num_samples, len(df))
+    sample_paths = random.sample(list(df['path'].values), sample_size)
+    
+    # Accumulate pixel values
+    mean_sum = torch.zeros(3)
+    total_pixels = 0
+    
+    transform = transforms.Compose([
+        transforms.Resize((img_size, img_size)),
+        transforms.ToTensor(),
+    ])
+    
+    # First pass: compute mean
+    for path in sample_paths:
+        img_path = os.path.join(data_dir, 'UTKFace_all', 'utkface_aligned_cropped', 'UTKFace', path)
+        try:
+            img = Image.open(img_path).convert('RGB')
+            img_tensor = transform(img)  # Shape: [3, H, W]
+            
+            # Accumulate sum per channel
+            for c in range(3):
+                mean_sum[c] += img_tensor[c].sum()
+            total_pixels += img_tensor.shape[1] * img_tensor.shape[2]
+        except Exception as e:
+            continue
+    
+    if total_pixels == 0:
+        print("Warning: Could not compute image stats, using default [0.5, 0.5, 0.5]")
+        return [0.5, 0.5, 0.5], [0.5, 0.5, 0.5]
+    
+    # Compute overall mean
+    mean = mean_sum / total_pixels
+    
+    # Second pass: compute std
+    std_sum = torch.zeros(3)
+    total_pixels = 0
+    for path in sample_paths:
+        img_path = os.path.join(data_dir, 'UTKFace_all', 'utkface_aligned_cropped', 'UTKFace', path)
+        try:
+            img = Image.open(img_path).convert('RGB')
+            img_tensor = transform(img)
+            
+            # Accumulate variance
+            for c in range(3):
+                std_sum[c] += ((img_tensor[c] - mean[c]) ** 2).sum()
+            total_pixels += img_tensor.shape[1] * img_tensor.shape[2]
+        except Exception:
+            continue
+    
+    std = torch.sqrt(std_sum / total_pixels)
+    
+    mean_list = [float(m) for m in mean]
+    std_list = [float(s) for s in std]
+    
+    print(f"UTKFACE image statistics computed from {len(sample_paths)} images: mean={mean_list}, std={std_list}")
+    return mean_list, std_list
+
+
+def compute_sen2_stats(data_dir, df, num_samples=200, seed=42):
+    """
+    Compute global min/max statistics for Sentinel-2 RGB bands after
+    clipping to [0, 4000] and scaling to [0, 1].
+    """
+    try:
+        import tifffile
+    except ImportError:
+        print("tifffile not available; using default sen2 min/max of [0,1].")
+        return [0.0, 0.0, 0.0], [1.0, 1.0, 1.0]
+
+    import random
+    random.seed(seed)
+
+    sample_size = min(num_samples, len(df))
+    sample_paths = random.sample(list(df['path'].values), sample_size)
+
+    band_mins = [np.inf, np.inf, np.inf]
+    band_maxs = [-np.inf, -np.inf, -np.inf]
+
+    for path in sample_paths:
+        img_path = os.path.join(data_dir, 'So2Sat_POP', path)
+        try:
+            img_array = tifffile.imread(img_path)
+            image_bands = img_array[:, :, [3, 2, 1]].astype(np.float32)
+            image_bands = np.clip(image_bands, 0, 4000) / 4000.0
+
+            for i in range(3):
+                band = image_bands[:, :, i]
+                band_mins[i] = min(band_mins[i], float(band.min()))
+                band_maxs[i] = max(band_maxs[i], float(band.max()))
+        except Exception:
+            continue
+
+    if any(np.isinf(v) for v in band_mins) or any(np.isinf(v) for v in band_maxs):
+        return [0.0, 0.0, 0.0], [1.0, 1.0, 1.0]
+
+    print(
+        "Sentinel-2 stats (post-clip/scale): "
+        f"min={band_mins}, max={band_maxs} (from {sample_size} samples)"
+    )
+    return band_mins, band_maxs
+
+
+def make_semi_loader(args, num_workers=12, use_cache=False):
+    """
+    Create data loaders for semi-supervised learning.
+    
+    Args:
+        args: Arguments containing dataset configuration
+        num_workers: Number of worker processes for data loading
+        use_cache: If True, preload datasets to memory for faster training
+    """
     # Handle CSV filename - so2sat_pop uses simreg_ prefix and data source suffix
     if args.dataset.lower() == 'so2sat_pop':
         data_source = getattr(args, 'data_source', 'sen2')  # default to sen2
@@ -91,12 +224,18 @@ def make_semi_loader(args, num_workers=12):
     label_mean = None
     label_std = None
     if args.normalize_labels:
-        label_mean = float(df_labeled['age'].mean())
-        label_std = float(df_labeled['age'].std())
-        # Avoid division by zero
-        if label_std < 1e-6:
-            label_std = 1.0
-        print(f"Label normalization enabled: mean={label_mean:.2f}, std={label_std:.2f}")
+        # Use fixed values if provided, otherwise compute from data
+        if args.label_mean is not None and args.label_std is not None:
+            label_mean = float(args.label_mean)
+            label_std = float(args.label_std)
+            print(f"Label normalization enabled with fixed values: mean={label_mean:.2f}, std={label_std:.2f}")
+        else:
+            label_mean = float(df_labeled['age'].mean())
+            label_std = float(df_labeled['age'].std())
+            # Avoid division by zero
+            if label_std < 1e-6:
+                label_std = 1.0
+            print(f"Label normalization enabled (computed from data): mean={label_mean:.2f}, std={label_std:.2f}")
         print(f"Label range: [{df_labeled['age'].min():.2f}, {df_labeled['age'].max():.2f}]")
     else:
         print("Label normalization disabled (using raw labels)")
@@ -110,25 +249,44 @@ def make_semi_loader(args, num_workers=12):
         LabeledDataset = UTKFace
         UnlabeledDataset = UTKFace_Unlabeled
         dem_min, dem_max = None, None  # Not used for UTKFace
+        
+        # Compute image mean/std if requested
+        img_mean, img_std = None, None
+        if args.compute_img_stats:
+            print("Computing image mean/std from UTKFACE training data...")
+            img_mean, img_std = compute_utkface_img_stats(args.data_dir, df_train, img_size=args.img_size, seed=args.seed)
+        else:
+            print("Using default image normalization [0.5, 0.5, 0.5]")
     elif args.dataset.lower() == 'so2sat_pop':
+        img_mean, img_std = None, None  # Not used for so2sat_pop
         LabeledDataset = So2Sat_POP
         UnlabeledDataset = So2Sat_POP_Unlabeled
         # Compute DEM statistics only for DEM data (not needed for Sentinel-2)
         data_source = getattr(args, 'data_source', 'sen2')
         if data_source == 'dem':
             dem_min, dem_max = compute_dem_stats(args.data_dir, df_train)
+            sen2_min, sen2_max = None, None
         else:
             dem_min, dem_max = None, None  # Not needed for Sentinel-2
+            sen2_min, sen2_max = compute_sen2_stats(args.data_dir, df_train, seed=args.seed)
     else:
         LabeledDataset = AgeDB
         UnlabeledDataset = AgeDB_Unlabeled
         dem_min, dem_max = None, None  # Not used for AgeDB
+        img_mean, img_std = None, None  # Not used for AgeDB
 
     # Create dataset kwargs (only pass dem stats for So2Sat_POP with DEM data)
     if args.dataset.lower() == 'so2sat_pop':
         dataset_kwargs = {
             'dem_min': dem_min,
             'dem_max': dem_max,
+            'sen2_min': sen2_min,
+            'sen2_max': sen2_max,
+        }
+    elif args.dataset.lower() == 'utkface':
+        dataset_kwargs = {
+            'img_mean': img_mean,
+            'img_std': img_std,
         }
     else:
         dataset_kwargs = {}
@@ -141,8 +299,7 @@ def make_semi_loader(args, num_workers=12):
                         label_std=label_std,
                         **dataset_kwargs
                         )
-    labeled_loader = DataLoader(labeled_set, batch_size=args.batch_size, shuffle=True, num_workers=num_workers, drop_last=True)
-
+    
     unlabeled_set = UnlabeledDataset(data_dir=args.data_dir,
                         df = df_unlabeled,
                         img_size=args.img_size,
@@ -151,7 +308,6 @@ def make_semi_loader(args, num_workers=12):
                         label_std=label_std,
                         **dataset_kwargs
                         )
-    unlabeled_loader = DataLoader(unlabeled_set, batch_size=args.batch_size, shuffle=True, num_workers=num_workers, drop_last=True)
     
     valid_set = LabeledDataset(data_dir=args.data_dir,
                         df = df_val,
@@ -161,7 +317,6 @@ def make_semi_loader(args, num_workers=12):
                         label_std=label_std,
                         **dataset_kwargs
                         )
-    valid_loader = DataLoader(valid_set, batch_size=args.batch_size, shuffle=False, num_workers=num_workers, drop_last=False)
         
     test_set = LabeledDataset(data_dir=args.data_dir,
                         df = df_test,
@@ -171,7 +326,23 @@ def make_semi_loader(args, num_workers=12):
                         label_std=label_std,
                         **dataset_kwargs
                         )
-    test_loader = DataLoader(test_set, batch_size=args.batch_size, shuffle=False, num_workers=num_workers, drop_last=False)
+    
+    # Apply in-memory caching if enabled
+    if use_cache:
+        print("\n" + "="*80)
+        print("ENABLING IN-MEMORY CACHING FOR FASTER TRAINING")
+        print("="*80)
+        labeled_set = CachedDataset(labeled_set, cache_images_only=False)
+        unlabeled_set = CachedDataset(unlabeled_set, cache_images_only=False)
+        valid_set = CachedDataset(valid_set, cache_images_only=False)
+        test_set = CachedDataset(test_set, cache_images_only=False)
+        print("="*80 + "\n")
+    
+    labeled_loader = DataLoader(labeled_set, batch_size=args.batch_size, shuffle=True, num_workers=num_workers, drop_last=True, pin_memory=True)
+    unlabeled_loader = DataLoader(unlabeled_set, batch_size=args.batch_size, shuffle=True, num_workers=num_workers, drop_last=True, pin_memory=True)
+    valid_loader = DataLoader(valid_set, batch_size=args.batch_size, shuffle=False, num_workers=num_workers, drop_last=False, pin_memory=True)
+    test_loader = DataLoader(test_set, batch_size=args.batch_size, shuffle=False, num_workers=num_workers, drop_last=False, pin_memory=True)
+    
     return labeled_loader, unlabeled_loader, valid_loader, test_loader
 
 

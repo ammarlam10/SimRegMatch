@@ -60,14 +60,19 @@ class SimRegMatchTrainer(object):
         os.makedirs(self.result_dir, exist_ok=True)
         
         self.writer = SummaryWriter(self.experiment_dir)
+        
+        # Enable in-memory caching if requested (default: False for safety)
+        use_cache = getattr(self.args, 'use_cache', False)
+        # Reduce num_workers if using cache to avoid shared memory issues
+        num_workers = 4 if use_cache else 8
         self.labeled_loader, self.unlabeled_loader, self.valid_loader, self.test_loader = \
-            make_semi_loader(self.args, num_workers=0)
+            make_semi_loader(self.args, num_workers=num_workers, use_cache=use_cache)
         
         # Use EfficientNet-B0 for so2sat_pop dataset, ResNet50 for others
-        # For population prediction, use softplus to ensure non-negative outputs
+        # Note: softplus removed to allow full range prediction with normalized labels
         if self.args.dataset.lower() == 'so2sat_pop':
-            self.model = efficientnet_b0(dropout=self.args.dropout, use_softplus=True).to(self.args.cuda)
-            print("Using EfficientNet-B0 model for so2sat_pop dataset with softplus activation")
+            self.model = efficientnet_b0(dropout=self.args.dropout, use_softplus=False).to(self.args.cuda)
+            print("Using EfficientNet-B0 model for so2sat_pop dataset")
         else:
             self.model = resnet50(dropout=self.args.dropout, use_softplus=False).to(self.args.cuda)
             print(f"Using ResNet50 model for {self.args.dataset} dataset")
@@ -204,9 +209,21 @@ class SimRegMatchTrainer(object):
                 loss_u = self.criterion_unlabel(v_mean.detach(), preds_s).sum(axis=1)
                 loss_u = (loss_u * mask).sum()/(int(mask.sum()))
                 
-                # Note: percentile arg is in [0,1] range (e.g., 0.95 = 95th percentile)
+                # Update threshold using percentile of uncertainty values
+                # Note: percentile arg is expected in [0,1] range (e.g., 0.95 = 95th percentile)
                 # np.percentile expects q in [0,100], so multiply by 100
-                self.args.threshold = np.percentile(v_uncertainty.detach().cpu().numpy(), q=float(self.args.percentile) * 100)           
+                # Handle case where percentile might already be in [0, 100] range
+                v_uncertainty_np = v_uncertainty.detach().cpu().numpy()
+                if len(v_uncertainty_np) > 0:
+                    percentile_value = float(self.args.percentile)
+                    # If percentile is <= 1, assume it's in [0, 1] range and convert to [0, 100]
+                    # Otherwise, assume it's already in [0, 100] range
+                    if percentile_value <= 1.0:
+                        percentile_value = percentile_value * 100
+                    # Ensure percentile is in valid range [0, 100]
+                    percentile_value = max(0.0, min(100.0, percentile_value))
+                    self.args.threshold = np.percentile(v_uncertainty_np, q=percentile_value)
+                # If no unlabeled samples, keep existing threshold           
                 self.writer.add_scalar(
                     'Threshold',
                     self.args.threshold,
@@ -347,6 +364,13 @@ class SimRegMatchTrainer(object):
 
     def inference(self, epoch):
         weight = torch.load(os.path.join(os.path.join(self.experiment_dir, 'best_model.pth')), map_location=self.args.cuda)
+        # Handle DataParallel state_dict (keys have 'module.' prefix)
+        # If model is wrapped in DataParallel but checkpoint wasn't, add 'module.' prefix
+        if isinstance(self.model, nn.DataParallel) and not any(k.startswith('module.') for k in weight.keys()):
+            weight = {f'module.{k}': v for k, v in weight.items()}
+        # If model is not wrapped but checkpoint was, remove 'module.' prefix
+        elif not isinstance(self.model, nn.DataParallel) and any(k.startswith('module.') for k in weight.keys()):
+            weight = {k.replace('module.', ''): v for k, v in weight.items()}
         self.model.load_state_dict(weight)
         
         self.model.eval()

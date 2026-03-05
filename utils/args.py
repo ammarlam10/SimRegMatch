@@ -11,7 +11,10 @@ def SimRegMatch_parser():
     parser.add_argument('--labeled-ratio', type=float, default=0.1)
     parser.add_argument('--img_size', type=int, default=224, help='image size used in training')
     parser.add_argument('--normalize-labels', action='store_true', default=False, help='Normalize labels using mean/std from training data (recommended for large-scale targets like population)')
+    parser.add_argument('--label-mean', type=float, default=None, help='Fixed mean for label normalization (overrides computed mean if provided)')
+    parser.add_argument('--label-std', type=float, default=None, help='Fixed std for label normalization (overrides computed std if provided)')
     parser.add_argument('--log-transform', action='store_true', default=False, help='Apply log1p transform to labels (recommended for highly skewed targets like population)')
+    parser.add_argument('--compute-img-stats', action='store_true', default=False, help='Compute image mean/std from dataset (for UTKFACE)')
     parser.add_argument('--data-source', type=str, default='sen2', choices=['dem', 'sen2'], help='Data source for so2sat_pop: dem (elevation) or sen2 (Sentinel-2 satellite imagery)')
 
     # For model architecture
@@ -49,5 +52,8 @@ def SimRegMatch_parser():
     # Resume training
     parser.add_argument('--resume', type=str, default=None, help='Path to checkpoint to resume from')
     parser.add_argument('--start-epoch', type=int, default=1, help='Starting epoch number (used when resuming)')
+    
+    # Performance optimizations
+    parser.add_argument('--use-cache', action='store_true', default=False, help='Preload all images to memory for faster training (requires ~15GB RAM)')
     
     return parser

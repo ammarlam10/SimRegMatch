@@ -69,7 +69,7 @@ class SimRegMatchTrainer(object):
         if self.args.dataset.lower() == 'so2sat_pop':
             self.model = efficientnet_b0(dropout=self.args.dropout, use_softplus=False).to(self.args.cuda)
             print("Using EfficientNet-B0 model for so2sat_pop dataset")
-        elif self.args.dataset.lower() == 'bayern_forest':
+        elif self.args.dataset.lower() in ['bayern_forest', 'simreg_bayern_forest']:
             # Check if unet-small is specified, otherwise use regular unet
             if self.args.model.lower() == 'unet-small':
                 self.model = unet_small(in_channels=3, out_channels=1, dropout=self.args.dropout).to(self.args.cuda)

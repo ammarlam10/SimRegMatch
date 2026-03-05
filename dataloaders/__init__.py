@@ -114,7 +114,7 @@ def make_semi_loader(args, num_workers=12):
         else:
             csv_filename = 'simreg_so2sat_pop.csv'
             print(f"Using DEM (elevation) data")
-    elif args.dataset.lower() == 'bayern_forest':
+    elif args.dataset.lower() in ['bayern_forest', 'simreg_bayern_forest']:
         csv_filename = 'simreg_bayern_forest.csv'
     else:
         csv_filename = f'{args.dataset}.csv'
@@ -169,7 +169,7 @@ def make_semi_loader(args, num_workers=12):
         else:
             dem_min, dem_max = None, None  # Not needed for Sentinel-2
             sen2_min, sen2_max = compute_sen2_stats(args.data_dir, df_train, seed=args.seed)
-    elif args.dataset.lower() == 'bayern_forest':
+    elif args.dataset.lower() in ['bayern_forest', 'simreg_bayern_forest']:
         LabeledDataset = Bayern_ForestHeight
         UnlabeledDataset = Bayern_ForestHeight_Unlabeled
         dem_min, dem_max = None, None  # Not used for Bayern Forest (normalization done in dataset)

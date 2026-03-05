@@ -1,20 +1,32 @@
 #!/bin/bash
-# Training script for Bayern Forest Height dataset
+# Bayern Forest Height: 5% labeled, GPU 2
+# Parameters from experiment_13
+# Usage: ./train_bayern_forest.sh [seed]
 
-echo "Starting training for Bayern Forest Height dataset..."
+set -e
+
+GPU_ID=2
+SEED=${1:-0}
+
+echo "=========================================="
+echo "SimRegMatch: Bayern Forest 5% labeled"
+echo "=========================================="
+echo "GPU: $GPU_ID | Seed: $SEED | Labeled: 5%"
+echo "Params from experiment_13"
+echo ""
 
 docker run -it --rm \
-    --gpus '"device=0"' \
+    --gpus "device=${GPU_ID}" \
     --shm-size=16g \
     -v $(pwd):/workspace \
-    -v /home/ammar/data:/workspace/data \
-    -v /home/ammar/tree/SimRegMatch/results:/workspace/results \
+    -v ~/data:/workspace/data \
     simregmatch:latest \
     python /workspace/main.py \
-        --dataset bayern_forest \
+        --dataset simreg_bayern_forest \
+        --data-source sen2 \
         --data_dir /workspace/data \
-        --labeled-ratio 0.1 \
-        --batch_size 16 \
+        --labeled-ratio 0.05 \
+        --batch_size 64 \
         --epochs 100 \
         --lr 0.001 \
         --optimizer adam \
@@ -26,9 +38,9 @@ docker run -it --rm \
         --threshold 10 \
         --iter-u 5 \
         --img_size 256 \
-        --model unet \
+        --model unet-small \
         --dropout 0.1 \
+        --gpu 0 \
         --normalize-labels \
-        --num_workers 4 \
-        --seed 0 \
-        --gpu 0
+        --num-workers 4 \
+        --seed "$SEED"

@@ -6,7 +6,7 @@ def SimRegMatch_parser():
     parser.add_argument('--method', type=str, default='SimRegMatch')
 
     # For data
-    parser.add_argument('--dataset', type=str, default='agedb', choices=['imdb_wiki', 'agedb', 'utkface', 'so2sat_pop', 'bayern_forest'], help='dataset name')
+    parser.add_argument('--dataset', type=str, default='agedb', choices=['imdb_wiki', 'agedb', 'utkface', 'so2sat_pop', 'bayern_forest', 'simreg_bayern_forest'], help='dataset name')
     parser.add_argument('--data_dir', type=str, default='./data', help='data directory')
     parser.add_argument('--labeled-ratio', type=float, default=0.1)
     parser.add_argument('--img_size', type=int, default=224, help='image size used in training')
@@ -50,5 +50,9 @@ def SimRegMatch_parser():
     # Resume training
     parser.add_argument('--resume', type=str, default=None, help='Path to checkpoint to resume from')
     parser.add_argument('--start-epoch', type=int, default=1, help='Starting epoch number (used when resuming)')
+    
+    # Performance optimizations
+    parser.add_argument('--use-cache', action='store_true', default=False, help='Preload all images to memory for faster training (requires ~15GB RAM)')
+    parser.add_argument('--num-workers', type=int, default=8, help='Number of data loading workers (use 0 for H5 datasets)')
     
     return parser

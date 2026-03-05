@@ -16,3 +16,6 @@ results/
 *.csv
 !data/*.csv
 .DS_Store
+HDD/
+data/
+*.h5

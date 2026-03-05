@@ -29,7 +29,7 @@ class HuberLoss(nn.Module):
         quadratic = torch.clamp(abs_diff, max=self.delta)
         linear = abs_diff - quadratic
         loss = 0.5 * quadratic ** 2 + self.delta * linear
-        
+         
         if self.reduction == 'mean':
             return loss.mean()
         elif self.reduction == 'sum':
@@ -42,6 +42,7 @@ class HuberLoss(nn.Module):
 from dataloaders import make_semi_loader
 from models.resnet_proposed import resnet50
 from models.efficientnet_wrapper import efficientnet_b0
+from models.unet import unet, unet_small
 
 from utils.saver import Saver
 from utils.tqdm_config import get_tqdm_config
@@ -61,16 +62,29 @@ class SimRegMatchTrainer(object):
         
         self.writer = SummaryWriter(self.experiment_dir)
         self.labeled_loader, self.unlabeled_loader, self.valid_loader, self.test_loader = \
-            make_semi_loader(self.args, num_workers=0)
+            make_semi_loader(self.args, num_workers=self.args.num_workers)
         
-        # Use EfficientNet-B0 for so2sat_pop dataset, ResNet50 for others
-        # For population prediction, use softplus to ensure non-negative outputs
+        # Use EfficientNet-B0 for so2sat_pop dataset, UNet for bayern_forest, ResNet50 for others
+        # Note: softplus removed to allow full range prediction with normalized labels
         if self.args.dataset.lower() == 'so2sat_pop':
-            self.model = efficientnet_b0(dropout=self.args.dropout, use_softplus=True).to(self.args.cuda)
-            print("Using EfficientNet-B0 model for so2sat_pop dataset with softplus activation")
+            self.model = efficientnet_b0(dropout=self.args.dropout, use_softplus=False).to(self.args.cuda)
+            print("Using EfficientNet-B0 model for so2sat_pop dataset")
+        elif self.args.dataset.lower() == 'bayern_forest':
+            # Check if unet-small is specified, otherwise use regular unet
+            if self.args.model.lower() == 'unet-small':
+                self.model = unet_small(in_channels=3, out_channels=1, dropout=self.args.dropout).to(self.args.cuda)
+                print("Using UNet-Small model (3 levels) for bayern_forest dataset (pixel-wise regression)")
+            else:
+                self.model = unet(in_channels=3, out_channels=1, dropout=self.args.dropout).to(self.args.cuda)
+                print("Using UNet model (4 levels) for bayern_forest dataset (pixel-wise regression)")
         else:
-            self.model = resnet50(dropout=self.args.dropout, use_softplus=False).to(self.args.cuda)
-            print(f"Using ResNet50 model for {self.args.dataset} dataset")
+            # Use pretrained weights for age estimation datasets (utkface, agedb)
+            use_pretrained = self.args.dataset.lower() in ['utkface', 'agedb']
+            self.model = resnet50(dropout=self.args.dropout, use_softplus=False, pretrained=use_pretrained).to(self.args.cuda)
+            if use_pretrained:
+                print(f"Using ResNet50 model with ImageNet pretrained weights for {self.args.dataset} dataset")
+            else:
+                print(f"Using ResNet50 model (from scratch) for {self.args.dataset} dataset")
         
         # Wrap model with DataParallel if multiple GPUs are available
         if torch.cuda.device_count() > 1:
@@ -175,8 +189,13 @@ class SimRegMatchTrainer(object):
                 loss_x = self.criterion(preds_x, labels_l)
                 
                 # loss calculation for unlabeled examples
-                v_mean = torch.mean(preds_w, axis=2) # pseudo labeling based on our model
-                vecs_w = torch.mean(vecs_w, axis=2)
+                # Handle both scalar and pixel-wise predictions
+                if preds_w.dim() == 5:  # Pixel-wise: (B, C, H, W, iter_u)
+                    v_mean = torch.mean(preds_w, dim=4)  # (B, C, H, W)
+                    vecs_w = torch.mean(vecs_w, dim=2)  # (B, feature_dim)
+                else:  # Scalar: (B, 1, iter_u)
+                    v_mean = torch.mean(preds_w, axis=2)  # (B, 1)
+                    vecs_w = torch.mean(vecs_w, axis=2)  # (B, feature_dim)
 
                 # similarity distribution
                 vecs_w, vecs_x = F.normalize(vecs_w, dim=1), F.normalize(vecs_x, dim=1) 
@@ -184,7 +203,15 @@ class SimRegMatchTrainer(object):
                 similaritys = torch.softmax(similaritys/self.args.t, dim=1)
                 
                 # similarity-based pseudo-label
-                v_similarity = similaritys @ labels_l
+                # Handle both scalar (B, 1) and pixel-wise (B, 1, H, W) labels
+                if labels_l.dim() == 4:  # Pixel-wise regression (B, 1, H, W)
+                    # For pixel-wise, we need to reshape for matrix multiplication
+                    B, C, H, W = labels_l.shape
+                    labels_l_flat = labels_l.view(B, -1)  # (B, C*H*W)
+                    v_similarity_flat = similaritys @ labels_l_flat  # (B_unlabeled, C*H*W)
+                    v_similarity = v_similarity_flat.view(-1, C, H, W)  # (B_unlabeled, C, H, W)
+                else:  # Scalar regression (B, 1)
+                    v_similarity = similaritys @ labels_l
                 
                 # Clean up inputs_l and labels_l - no longer needed after similarity computation
                 del inputs_l, labels_l
@@ -193,16 +220,26 @@ class SimRegMatchTrainer(object):
                 v_mean = self.args.beta*v_mean + (1-self.args.beta)*v_similarity # beta*modelPL + (1-beta)*simPL
                 
                 # uncertainty estimation
-                v_uncertainty = torch.pow(torch.std(preds_w, axis=2), 2)
-                v_uncertainty = torch.sum(v_uncertainty, axis=1)
+                # Handle both scalar and pixel-wise predictions
+                if preds_w.dim() == 5:  # Pixel-wise: (B, C, H, W, iter_u)
+                    v_uncertainty = torch.pow(torch.std(preds_w, dim=4), 2)  # (B, C, H, W)
+                    v_uncertainty = torch.sum(v_uncertainty, dim=(1, 2, 3))  # (B,)
+                else:  # Scalar: (B, 1, iter_u)
+                    v_uncertainty = torch.pow(torch.std(preds_w, axis=2), 2)  # (B, 1)
+                    v_uncertainty = torch.sum(v_uncertainty, axis=1)  # (B,)
                 
                 # Clean up inputs_u and preds_w - no longer needed after uncertainty computation
                 del inputs_u, preds_w
                 
                 # pseudo-label filtering
                 mask = (v_uncertainty < self.args.threshold)
-                loss_u = self.criterion_unlabel(v_mean.detach(), preds_s).sum(axis=1)
-                loss_u = (loss_u * mask).sum()/(int(mask.sum()))
+                loss_u_per_sample = self.criterion_unlabel(v_mean.detach(), preds_s)
+                # Handle both scalar and pixel-wise loss
+                if loss_u_per_sample.dim() == 4:  # Pixel-wise (B, C, H, W)
+                    loss_u_per_sample = loss_u_per_sample.mean(dim=(1, 2, 3))  # (B,) - use mean to match labeled loss scale
+                else:  # Scalar (B, 1)
+                    loss_u_per_sample = loss_u_per_sample.sum(axis=1)  # (B,)
+                loss_u = (loss_u_per_sample * mask).sum()/(int(mask.sum()))
                 
                 # Note: percentile arg is in [0,1] range (e.g., 0.95 = 95th percentile)
                 # np.percentile expects q in [0,100], so multiply by 100
@@ -271,7 +308,7 @@ class SimRegMatchTrainer(object):
                         preds_denorm = preds_denorm * self.args.label_std + self.args.label_mean
                     
                     # Reverse log-transform if it was applied
-                    if self.args.log_transform:
+                    if getattr(self.args, 'log_transform', False):
                         labels_denorm = torch.expm1(labels_denorm)  # exp(x) - 1
                         preds_denorm = torch.expm1(preds_denorm)
                     
@@ -314,6 +351,11 @@ class SimRegMatchTrainer(object):
                 self.args.valid_rmse = str(rmse)
                 
                 labels_total, preds_total = labels_total.numpy(), preds_total.numpy()
+                
+                # For pixel-wise predictions, flatten to save as CSV
+                if labels_total.ndim > 2:  # Pixel-wise (B, C, H, W)
+                    labels_total = labels_total.reshape(-1)  # Flatten all dimensions
+                    preds_total = preds_total.reshape(-1)
 
                 labels_total, preds_total = pd.DataFrame(labels_total), pd.DataFrame(preds_total)
                 df = pd.concat([labels_total, preds_total], axis=1)
@@ -347,6 +389,13 @@ class SimRegMatchTrainer(object):
 
     def inference(self, epoch):
         weight = torch.load(os.path.join(os.path.join(self.experiment_dir, 'best_model.pth')), map_location=self.args.cuda)
+        # Handle DataParallel state_dict (keys have 'module.' prefix)
+        # If model is wrapped in DataParallel but checkpoint wasn't, add 'module.' prefix
+        if isinstance(self.model, nn.DataParallel) and not any(k.startswith('module.') for k in weight.keys()):
+            weight = {f'module.{k}': v for k, v in weight.items()}
+        # If model is not wrapped but checkpoint was, remove 'module.' prefix
+        elif not isinstance(self.model, nn.DataParallel) and any(k.startswith('module.') for k in weight.keys()):
+            weight = {k.replace('module.', ''): v for k, v in weight.items()}
         self.model.load_state_dict(weight)
         
         self.model.eval()
@@ -373,7 +422,7 @@ class SimRegMatchTrainer(object):
                         preds_denorm = preds_denorm * self.args.label_std + self.args.label_mean
                     
                     # Reverse log-transform if it was applied
-                    if self.args.log_transform:
+                    if getattr(self.args, 'log_transform', False):
                         labels_denorm = torch.expm1(labels_denorm)  # exp(x) - 1
                         preds_denorm = torch.expm1(preds_denorm)
                     
@@ -406,6 +455,11 @@ class SimRegMatchTrainer(object):
             self.args.test_rmse = str(rmse)
             
             labels_total, preds_total = labels_total.numpy(), preds_total.numpy()
+            
+            # For pixel-wise predictions, flatten to save as CSV
+            if labels_total.ndim > 2:  # Pixel-wise (B, C, H, W)
+                labels_total = labels_total.reshape(-1)  # Flatten all dimensions
+                preds_total = preds_total.reshape(-1)
 
             labels_total, preds_total = pd.DataFrame(labels_total), pd.DataFrame(preds_total)
             df = pd.concat([labels_total, preds_total], axis=1)
@@ -418,6 +472,12 @@ class SimRegMatchTrainer(object):
     @staticmethod
     def regression_metrics(reals, preds):
         reals, preds = reals.numpy(), preds.numpy()
+        
+        # Flatten arrays for pixel-wise regression (handles both scalar and spatial predictions)
+        # For scalar: (B, 1) -> (B,)
+        # For spatial: (B, 1, H, W) -> (B*H*W,)
+        reals = reals.flatten()
+        preds = preds.flatten()
         
         r2, mae = r2_score(reals, preds), mean_absolute_error(reals, preds)
         rmse = np.sqrt(mean_squared_error(reals, preds))

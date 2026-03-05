@@ -10,6 +10,8 @@ from dataloaders.datasets.UTKFace import UTKFace
 from dataloaders.datasets.UTKFace_Unlabeled import UTKFace_Unlabeled
 from dataloaders.datasets.So2Sat_POP import So2Sat_POP
 from dataloaders.datasets.So2Sat_POP_Unlabeled import So2Sat_POP_Unlabeled
+from dataloaders.datasets.Bayern_ForestHeight import Bayern_ForestHeight
+from dataloaders.datasets.Bayern_ForestHeight_Unlabeled import Bayern_ForestHeight_Unlabeled
 
 
 def compute_dem_stats(data_dir, df, num_samples=1000):
@@ -58,6 +60,50 @@ def compute_dem_stats(data_dir, df, num_samples=1000):
     return dem_min, dem_max
 
 
+def compute_sen2_stats(data_dir, df, num_samples=200, seed=42):
+    """
+    Compute global min/max statistics for Sentinel-2 RGB bands after
+    clipping to [0, 4000] and scaling to [0, 1].
+    """
+    try:
+        import tifffile
+    except ImportError:
+        print("tifffile not available; using default sen2 min/max of [0,1].")
+        return [0.0, 0.0, 0.0], [1.0, 1.0, 1.0]
+
+    import random
+    random.seed(seed)
+
+    sample_size = min(num_samples, len(df))
+    sample_paths = random.sample(list(df['path'].values), sample_size)
+
+    band_mins = [np.inf, np.inf, np.inf]
+    band_maxs = [-np.inf, -np.inf, -np.inf]
+
+    for path in sample_paths:
+        img_path = os.path.join(data_dir, 'So2Sat_POP', path)
+        try:
+            img_array = tifffile.imread(img_path)
+            image_bands = img_array[:, :, [3, 2, 1]].astype(np.float32)
+            image_bands = np.clip(image_bands, 0, 4000) / 4000.0
+
+            for i in range(3):
+                band = image_bands[:, :, i]
+                band_mins[i] = min(band_mins[i], float(band.min()))
+                band_maxs[i] = max(band_maxs[i], float(band.max()))
+        except Exception:
+            continue
+
+    if any(np.isinf(v) for v in band_mins) or any(np.isinf(v) for v in band_maxs):
+        return [0.0, 0.0, 0.0], [1.0, 1.0, 1.0]
+
+    print(
+        "Sentinel-2 stats (post-clip/scale): "
+        f"min={band_mins}, max={band_maxs} (from {sample_size} samples)"
+    )
+    return band_mins, band_maxs
+
+
 def make_semi_loader(args, num_workers=12):
     # Handle CSV filename - so2sat_pop uses simreg_ prefix and data source suffix
     if args.dataset.lower() == 'so2sat_pop':
@@ -68,6 +114,8 @@ def make_semi_loader(args, num_workers=12):
         else:
             csv_filename = 'simreg_so2sat_pop.csv'
             print(f"Using DEM (elevation) data")
+    elif args.dataset.lower() == 'bayern_forest':
+        csv_filename = 'simreg_bayern_forest.csv'
     else:
         csv_filename = f'{args.dataset}.csv'
     
@@ -117,8 +165,14 @@ def make_semi_loader(args, num_workers=12):
         data_source = getattr(args, 'data_source', 'sen2')
         if data_source == 'dem':
             dem_min, dem_max = compute_dem_stats(args.data_dir, df_train)
+            sen2_min, sen2_max = None, None
         else:
             dem_min, dem_max = None, None  # Not needed for Sentinel-2
+            sen2_min, sen2_max = compute_sen2_stats(args.data_dir, df_train, seed=args.seed)
+    elif args.dataset.lower() == 'bayern_forest':
+        LabeledDataset = Bayern_ForestHeight
+        UnlabeledDataset = Bayern_ForestHeight_Unlabeled
+        dem_min, dem_max = None, None  # Not used for Bayern Forest (normalization done in dataset)
     else:
         LabeledDataset = AgeDB
         UnlabeledDataset = AgeDB_Unlabeled
@@ -129,6 +183,8 @@ def make_semi_loader(args, num_workers=12):
         dataset_kwargs = {
             'dem_min': dem_min,
             'dem_max': dem_max,
+            'sen2_min': sen2_min,
+            'sen2_max': sen2_max,
         }
     else:
         dataset_kwargs = {}

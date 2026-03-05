@@ -1,5 +1,7 @@
 import math
+import torch
 import torch.nn as nn
+from torchvision.models import resnet50 as torchvision_resnet50
 
 
 def conv3x3(in_planes, out_planes, stride=1):
@@ -137,5 +139,39 @@ class ResNet(nn.Module):
         return x, encoding
 
 
-def resnet50(dropout, use_softplus=False):
-    return ResNet(Bottleneck, [3, 4, 6, 3], dropout, use_softplus=use_softplus)
+def resnet50(dropout, use_softplus=False, pretrained=True):
+    """
+    Create ResNet50 model with optional pretrained ImageNet weights.
+    
+    Args:
+        dropout: Dropout probability
+        use_softplus: Whether to use softplus activation
+        pretrained: Whether to load ImageNet pretrained weights (default: True)
+    
+    Returns:
+        ResNet model with regression head
+    """
+    if pretrained:
+        # Load pretrained ResNet50 from torchvision
+        print("Loading ImageNet pretrained ResNet50 weights...")
+        pretrained_model = torchvision_resnet50(pretrained=True)
+        
+        # Create our custom model
+        model = ResNet(Bottleneck, [3, 4, 6, 3], dropout, use_softplus=use_softplus)
+        
+        # Copy pretrained weights (excluding final FC layer)
+        pretrained_dict = pretrained_model.state_dict()
+        model_dict = model.state_dict()
+        
+        # Filter out the final FC layer (fc.weight, fc.bias)
+        pretrained_dict = {k: v for k, v in pretrained_dict.items() 
+                          if k in model_dict and not k.startswith('fc.')}
+        
+        # Update model with pretrained weights
+        model_dict.update(pretrained_dict)
+        model.load_state_dict(model_dict)
+        
+        print(f"Loaded pretrained weights for {len(pretrained_dict)} layers")
+        return model
+    else:
+        return ResNet(Bottleneck, [3, 4, 6, 3], dropout, use_softplus=use_softplus)

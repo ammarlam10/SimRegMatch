@@ -6,7 +6,7 @@ def SimRegMatch_parser():
     parser.add_argument('--method', type=str, default='SimRegMatch')
 
     # For data
-    parser.add_argument('--dataset', type=str, default='agedb', choices=['imdb_wiki', 'agedb', 'utkface', 'so2sat_pop'], help='dataset name')
+    parser.add_argument('--dataset', type=str, default='agedb', choices=['imdb_wiki', 'agedb', 'utkface', 'so2sat_pop', 'bayern_forest'], help='dataset name')
     parser.add_argument('--data_dir', type=str, default='./data', help='data directory')
     parser.add_argument('--labeled-ratio', type=float, default=0.1)
     parser.add_argument('--img_size', type=int, default=224, help='image size used in training')
@@ -39,7 +39,8 @@ def SimRegMatch_parser():
     parser.add_argument('--weight-decay', type=float, default=1e-4, help='optimizer weight decay')
     parser.add_argument('--epochs', type=int, default=100, help='number of epochs to train')
     parser.add_argument('--batch_size', type=int, default=16, help='batch size')
-    
+    parser.add_argument('--num_workers', type=int, default=0, help='number of DataLoader workers (0 = single-threaded)')
+
     # seed
     parser.add_argument('--seed', default=0)
     

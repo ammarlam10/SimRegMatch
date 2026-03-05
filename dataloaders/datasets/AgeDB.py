@@ -38,18 +38,19 @@ class AgeDB(Dataset):
                 'label': label}
 
     def get_transform(self):
+        # ImageNet normalization for pretrained models
         if self.split == 'train':
             transform = transforms.Compose([
                 transforms.Resize((self.img_size, self.img_size)),
                 transforms.RandomCrop(self.img_size, padding=16),
                 transforms.RandomHorizontalFlip(),
                 transforms.ToTensor(),
-                transforms.Normalize([.5, .5, .5], [.5, .5, .5]),
+                transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
             ])
         else:
             transform = transforms.Compose([
                 transforms.Resize((self.img_size, self.img_size)),
                 transforms.ToTensor(),
-                transforms.Normalize([.5, .5, .5], [.5, .5, .5]),
+                transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
             ])
         return transform

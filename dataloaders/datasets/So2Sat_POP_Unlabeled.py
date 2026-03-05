@@ -31,15 +31,8 @@ class So2Sat_POP_Unlabeled(Dataset):
     # Sentinel-2 band indices for RGB (B4=Red, B3=Green, B2=Blue)
     SEN2_RGB_BANDS = [3, 2, 1]  # R, G, B order
     
-    # Global normalization values for Sentinel-2 RGB bands (computed from training data)
-    SEN2_NORM = {
-        3: (318, 2130),   # Red (B4)
-        2: (560, 1776),   # Green (B3)
-        1: (713, 1733),   # Blue (B2)
-    }
-    
     def __init__(self, df, data_dir, img_size, split='train', label_mean=None, label_std=None,
-                 dem_min=None, dem_max=None):
+                 dem_min=None, dem_max=None, sen2_min=None, sen2_max=None):
         self.df = df
         self.data_dir = data_dir
         self.img_size = img_size
@@ -50,6 +43,10 @@ class So2Sat_POP_Unlabeled(Dataset):
         # DEM normalization statistics (use provided values or fallback to defaults)
         self.dem_min = dem_min if dem_min is not None else -2.0
         self.dem_max = dem_max if dem_max is not None else 2.0
+
+        # Sentinel-2 global min/max per band after clip(/4000) normalization
+        self.sen2_min = sen2_min if sen2_min is not None else [0.0, 0.0, 0.0]
+        self.sen2_max = sen2_max if sen2_max is not None else [1.0, 1.0, 1.0]
         
         # Auto-detect data type from first path
         first_path = df.iloc[0]['path']
@@ -97,19 +94,21 @@ class So2Sat_POP_Unlabeled(Dataset):
         img_array = tifffile.imread(img_path)
         
         # Extract RGB bands (B4, B3, B2 = indices 3, 2, 1)
-        rgb = np.zeros((img_array.shape[0], img_array.shape[1], 3), dtype=np.float32)
+        image_bands = img_array[:, :, self.SEN2_RGB_BANDS].astype(np.float32)
         
-        # Apply global normalization (fixed percentiles from training data)
-        for i, band_idx in enumerate(self.SEN2_RGB_BANDS):
-            band = img_array[:, :, band_idx].astype(np.float32)
-            p2, p98 = self.SEN2_NORM[band_idx]
-            
-            # Clip to global percentile range and scale to [0, 255]
-            band = np.clip(band, p2, p98)
-            band = (band - p2) / (p98 - p2) * 255
-            rgb[:, :, i] = band
-        
-        rgb = rgb.astype(np.uint8)
+        # Clip to valid range, scale to [0, 1]
+        image_bands = np.clip(image_bands, 0, 4000)
+        image_bands = image_bands / 4000.0
+
+        # Global min-max normalization per band
+        for i in range(3):
+            denom = self.sen2_max[i] - self.sen2_min[i]
+            if denom < 1e-6:
+                denom = 1.0
+            image_bands[:, :, i] = (image_bands[:, :, i] - self.sen2_min[i]) / denom
+
+        image_bands = np.clip(image_bands, 0.0, 1.0)
+        rgb = (image_bands * 255.0).round().astype(np.uint8)
         return Image.fromarray(rgb, mode='RGB')
 
     def _load_dem(self, img_path):

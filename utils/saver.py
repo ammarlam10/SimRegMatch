@@ -34,6 +34,13 @@ class Saver(object):
         self.save_args = args.__dict__.copy()
         if 'cuda' in self.save_args:
             del(self.save_args['cuda'])
+        
+        # Convert numpy types to native Python types for JSON serialization
+        for key, value in self.save_args.items():
+            if isinstance(value, (np.integer, np.floating)):
+                self.save_args[key] = float(value)
+            elif isinstance(value, np.ndarray):
+                self.save_args[key] = value.tolist()
 
         with open(os.path.join(self.experiment_dir, 'arg_parser.txt'), 'w') as f:
             json.dump(self.save_args, f, indent=2)

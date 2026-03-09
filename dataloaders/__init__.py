@@ -139,12 +139,18 @@ def make_semi_loader(args, num_workers=12):
     label_mean = None
     label_std = None
     if args.normalize_labels:
-        label_mean = float(df_labeled['age'].mean())
-        label_std = float(df_labeled['age'].std())
-        # Avoid division by zero
-        if label_std < 1e-6:
-            label_std = 1.0
-        print(f"Label normalization enabled: mean={label_mean:.2f}, std={label_std:.2f}")
+        # Use fixed normalization values for so2sat_pop dataset
+        if args.dataset.lower() == 'so2sat_pop':
+            label_mean = 1085.0
+            label_std = 2800.0
+            print(f"Using fixed normalization for so2sat_pop: mean={label_mean}, std={label_std}")
+        else:
+            label_mean = float(df_labeled['age'].mean())
+            label_std = float(df_labeled['age'].std())
+            # Avoid division by zero
+            if label_std < 1e-6:
+                label_std = 1.0
+            print(f"Label normalization enabled: mean={label_mean:.2f}, std={label_std:.2f}")
         print(f"Label range: [{df_labeled['age'].min():.2f}, {df_labeled['age'].max():.2f}]")
     else:
         print("Label normalization disabled (using raw labels)")
@@ -248,67 +254,14 @@ def make_balanced_unlabeled(data, args):
     l_set, u_set = [], []
     
     if unique_values > HIGH_CARDINALITY_THRESHOLD:
-        # STRATIFIED: Use log-spaced bins for skewed data
-        # This ensures better coverage of the full distribution
-        print(f"High-cardinality target detected ({unique_values} unique values). Using STRATIFIED sampling.")
+        # Simple random split for high-cardinality targets
+        print(f"High-cardinality target detected ({unique_values} unique values). Using simple random 50/50 split.")
         
-        # Separate zero values (common in population data)
-        zero_mask = data['age'] == 0
-        zero_data = data[zero_mask]
-        nonzero_data = data[~zero_mask]
-        
-        # Handle zero-valued samples separately
-        if len(zero_data) > 0:
-            zero_paths = list(zero_data['path'].values)
-            random.shuffle(zero_paths)
-            split_point = len(zero_paths) // 2
-            l_set += zero_paths[:split_point]
-            u_set += zero_paths[split_point:]
-            print(f"  Zero-value samples: {len(zero_data)} (split 50/50)")
-        
-        # For non-zero values, use log-spaced bins for better coverage
-        if len(nonzero_data) > 0:
-            log_values = np.log1p(nonzero_data['age'].values)
-            
-            # Create bins based on log-transformed values (better for skewed data)
-            percentiles = np.linspace(0, 100, NUM_BINS + 1)
-            log_bins = np.percentile(log_values, percentiles)
-            log_bins = np.unique(log_bins)
-            
-            if len(log_bins) >= 2:
-                nonzero_data = nonzero_data.copy()
-                nonzero_data['log_age'] = log_values
-                nonzero_data['age_bin'] = pd.cut(nonzero_data['log_age'], bins=log_bins, 
-                                                  include_lowest=True, duplicates='drop')
-                
-                # Split within each bin (50/50 labeled/unlabeled)
-                for bin_label in nonzero_data['age_bin'].dropna().unique():
-                    curr_df = nonzero_data[nonzero_data['age_bin'] == bin_label]
-                    curr_data = list(curr_df['path'].values)
-                    random.shuffle(curr_data)
-                    
-                    curr_size = len(curr_data) // 2
-                    l_set += curr_data[:curr_size]
-                    u_set += curr_data[curr_size:]
-                
-                # Handle any samples that didn't get binned
-                binned_paths = set(l_set + u_set)
-                unbinned = nonzero_data[~nonzero_data['path'].isin(binned_paths)]
-                if len(unbinned) > 0:
-                    unbinned_paths = list(unbinned['path'].values)
-                    random.shuffle(unbinned_paths)
-                    split_point = len(unbinned_paths) // 2
-                    l_set += unbinned_paths[:split_point]
-                    u_set += unbinned_paths[split_point:]
-            else:
-                # Fallback: simple random split
-                nonzero_paths = list(nonzero_data['path'].values)
-                random.shuffle(nonzero_paths)
-                split_point = len(nonzero_paths) // 2
-                l_set += nonzero_paths[:split_point]
-                u_set += nonzero_paths[split_point:]
-            
-            print(f"  Non-zero samples: {len(nonzero_data)} (stratified by log-value)")
+        all_paths = list(data['path'].values)
+        random.shuffle(all_paths)
+        split_point = len(all_paths) // 2
+        l_set = all_paths[:split_point]
+        u_set = all_paths[split_point:]
     else:
         # Original exact-value matching strategy (for age datasets like UTKFace)
         age_range = range(min_age, max_age + 1)

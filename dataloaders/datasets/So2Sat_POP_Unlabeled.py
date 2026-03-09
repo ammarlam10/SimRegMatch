@@ -149,12 +149,16 @@ class So2Sat_POP_Unlabeled(Dataset):
 
     def apply_strong_transforms(self, img, use_grayscale_aug=False):
         """Apply strong augmentation (RandAugment + resize + normalize)."""
-        # Apply RandAugment
+        # For small images (e.g. 100x100 Sentinel-2 patches), resize FIRST to target size
+        # before applying RandAugment. This ensures augmentation parameters work consistently
+        # regardless of original image size.
+        img = TF.resize(img, (self.img_size, self.img_size))
+        
+        # Apply RandAugment on resized image
         rand_aug = RandAug.RandAugmentPC(n=2, m=10, img_size=self.img_size, grayscale=use_grayscale_aug)
         img = rand_aug(img)
         
-        # Resize and convert to tensor
-        img = TF.resize(img, (self.img_size, self.img_size))
+        # Convert to tensor and normalize
         img = TF.to_tensor(img)
         img = TF.normalize(img, [0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
         

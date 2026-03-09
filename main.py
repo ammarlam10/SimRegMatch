@@ -21,7 +21,8 @@ def main():
     
     for epoch in range(start_epoch, args.epochs+1, 1):
         trainer.train(epoch)
-        trainer.validation(epoch)
+        if epoch <= 5 or epoch % 10 == 0:
+            trainer.validation(epoch)
     
     trainer.inference(epoch)
 

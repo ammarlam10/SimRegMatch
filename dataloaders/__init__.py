@@ -104,6 +104,67 @@ def compute_sen2_stats(data_dir, df, num_samples=200, seed=42):
     return band_mins, band_maxs
 
 
+def compute_bayern_rgb_stats(data_dir, df, num_samples=500, seed=42):
+    """
+    Compute global min/max statistics for Bayern Forest RGB imagery.
+    
+    Args:
+        data_dir: Base data directory
+        df: DataFrame with paths in format "filename,patch_idx"
+        num_samples: Number of patches to sample for statistics
+        seed: Random seed
+    
+    Returns:
+        (rgb_min, rgb_max) tuple - global min/max across all RGB channels
+    """
+    import random
+    import h5py
+    
+    random.seed(seed)
+    
+    sample_size = min(num_samples, len(df))
+    sample_paths = random.sample(list(df['path'].values), sample_size)
+    
+    all_mins = []
+    all_maxs = []
+    
+    print(f"Computing Bayern Forest RGB statistics from {sample_size} patches...")
+    
+    # Group by file to minimize HDF5 file opens
+    file_patches = {}
+    for path in sample_paths:
+        filename, patch_idx = path.split(',')
+        patch_idx = int(patch_idx)
+        if filename not in file_patches:
+            file_patches[filename] = []
+        file_patches[filename].append(patch_idx)
+    
+    for filename, patch_indices in file_patches.items():
+        h5_path = os.path.join(data_dir, 'Bayern_forest_height_reduced', filename)
+        try:
+            with h5py.File(h5_path, 'r') as f:
+                for patch_idx in patch_indices:
+                    rgb = f['rgb'][patch_idx]  # (256, 256, 3)
+                    # Data is float32 in [0, 255] range, use as-is
+                    all_mins.append(float(rgb.min()))
+                    all_maxs.append(float(rgb.max()))
+        except Exception as e:
+            print(f"Warning: Could not load {filename}: {e}")
+            continue
+    
+    if len(all_mins) == 0:
+        # Fallback to default uint8 range
+        print("Warning: No samples loaded, using default [0, 255]")
+        return 0.0, 255.0
+    
+    # Use percentiles to be robust to outliers
+    rgb_min = float(np.percentile(all_mins, 1))  # 1st percentile
+    rgb_max = float(np.percentile(all_maxs, 99))  # 99th percentile
+    
+    print(f"Bayern RGB stats: min={rgb_min:.2f}, max={rgb_max:.2f} (from {len(all_mins)} patches)")
+    return rgb_min, rgb_max
+
+
 def make_semi_loader(args, num_workers=12):
     # Handle CSV filename - so2sat_pop uses simreg_ prefix and data source suffix
     if args.dataset.lower() == 'so2sat_pop':
@@ -178,19 +239,26 @@ def make_semi_loader(args, num_workers=12):
     elif args.dataset.lower() in ['bayern_forest', 'simreg_bayern_forest']:
         LabeledDataset = Bayern_ForestHeight
         UnlabeledDataset = Bayern_ForestHeight_Unlabeled
-        dem_min, dem_max = None, None  # Not used for Bayern Forest (normalization done in dataset)
+        # Compute global RGB statistics for consistent normalization
+        rgb_min, rgb_max = compute_bayern_rgb_stats(args.data_dir, df_train, seed=args.seed)
+        dem_min, dem_max = None, None
     else:
         LabeledDataset = AgeDB
         UnlabeledDataset = AgeDB_Unlabeled
         dem_min, dem_max = None, None  # Not used for AgeDB
 
-    # Create dataset kwargs (only pass dem stats for So2Sat_POP with DEM data)
+    # Create dataset kwargs (pass stats based on dataset type)
     if args.dataset.lower() == 'so2sat_pop':
         dataset_kwargs = {
             'dem_min': dem_min,
             'dem_max': dem_max,
             'sen2_min': sen2_min,
             'sen2_max': sen2_max,
+        }
+    elif args.dataset.lower() in ['bayern_forest', 'simreg_bayern_forest']:
+        dataset_kwargs = {
+            'rgb_min': rgb_min,
+            'rgb_max': rgb_max,
         }
     else:
         dataset_kwargs = {}
@@ -253,7 +321,8 @@ def make_balanced_unlabeled(data, args):
     
     l_set, u_set = [], []
     
-    if unique_values > HIGH_CARDINALITY_THRESHOLD:
+    # Bayern Forest has continuous height values, always use simple random split
+    if args.dataset.lower() in ['bayern_forest', 'simreg_bayern_forest'] or unique_values > HIGH_CARDINALITY_THRESHOLD:
         # Simple random split for high-cardinality targets
         print(f"High-cardinality target detected ({unique_values} unique values). Using simple random 50/50 split.")
         
@@ -300,7 +369,8 @@ def make_reduced(data, args):
     
     use_set, not_set = [], []
     
-    if unique_values > HIGH_CARDINALITY_THRESHOLD:
+    # Bayern Forest has continuous height values, always use simple random split
+    if args.dataset.lower() in ['bayern_forest', 'simreg_bayern_forest'] or unique_values > HIGH_CARDINALITY_THRESHOLD:
         # STRATIFIED: Use log-spaced bins for skewed data
         print(f"Using stratified reduction with labeled_ratio={args.labeled_ratio}")
         

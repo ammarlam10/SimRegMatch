@@ -22,13 +22,18 @@ class Bayern_ForestHeight_Unlabeled(Dataset):
     - Strong augmentation: RandAugment (geometric only, no color for nDSM)
     """
     
-    def __init__(self, df, data_dir, img_size, split='train', label_mean=None, label_std=None):
+    def __init__(self, df, data_dir, img_size, split='train', label_mean=None, label_std=None,
+                 rgb_min=None, rgb_max=None):
         self.df = df
         self.data_dir = data_dir
         self.img_size = img_size
         self.split = split
         self.label_mean = label_mean
         self.label_std = label_std
+        
+        # Global RGB normalization statistics (use provided or fallback to uint8 range)
+        self.rgb_min = rgb_min if rgb_min is not None else 0.0
+        self.rgb_max = rgb_max if rgb_max is not None else 255.0
         
         # Pre-load all HDF5 files into memory (to avoid multiprocessing issues with h5py)
         print(f"Bayern_ForestHeight_Unlabeled: {split} set with {len(df)} patches")
@@ -70,8 +75,9 @@ class Bayern_ForestHeight_Unlabeled(Dataset):
         ndsm = self.h5_cache[filename]['ndsm'][patch_idx]  # (256, 256, 1)
         
         # Convert to PIL Image
+        # RGB: float32 in [0, 255] range, cast directly to uint8
         if rgb.dtype == np.float32:
-            rgb = (rgb * 255).astype(np.uint8)
+            rgb = rgb.astype(np.uint8)
         rgb_pil = Image.fromarray(rgb, mode='RGB')
         
         # nDSM: float32
@@ -119,11 +125,10 @@ class Bayern_ForestHeight_Unlabeled(Dataset):
         # Convert RGB to tensor
         rgb_tensor = TF.to_tensor(rgb_pil)  # (3, H, W) in [0, 1]
         
-        # Per-image min-max normalization for RGB
-        rgb_min = rgb_tensor.min()
-        rgb_max = rgb_tensor.max()
-        if rgb_max - rgb_min > 1e-6:
-            rgb_tensor = (rgb_tensor - rgb_min) / (rgb_max - rgb_min)
+        # Global min-max normalization for RGB (using dataset-wide statistics)
+        rgb_tensor = rgb_tensor * 255.0  # Back to [0, 255] range
+        rgb_tensor = (rgb_tensor - self.rgb_min) / (self.rgb_max - self.rgb_min)
+        rgb_tensor = torch.clamp(rgb_tensor, 0.0, 1.0)  # Clip to [0, 1]
         
         # Normalize to [-1, 1]
         rgb_tensor = TF.normalize(rgb_tensor, [0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
@@ -167,11 +172,10 @@ class Bayern_ForestHeight_Unlabeled(Dataset):
         # Convert RGB to tensor
         rgb_tensor = TF.to_tensor(rgb_pil_aug)  # (3, H, W) in [0, 1]
         
-        # Per-image min-max normalization for RGB
-        rgb_min = rgb_tensor.min()
-        rgb_max = rgb_tensor.max()
-        if rgb_max - rgb_min > 1e-6:
-            rgb_tensor = (rgb_tensor - rgb_min) / (rgb_max - rgb_min)
+        # Global min-max normalization for RGB (using dataset-wide statistics)
+        rgb_tensor = rgb_tensor * 255.0  # Back to [0, 255] range
+        rgb_tensor = (rgb_tensor - self.rgb_min) / (self.rgb_max - self.rgb_min)
+        rgb_tensor = torch.clamp(rgb_tensor, 0.0, 1.0)  # Clip to [0, 1]
         
         # Normalize to [-1, 1]
         rgb_tensor = TF.normalize(rgb_tensor, [0.5, 0.5, 0.5], [0.5, 0.5, 0.5])

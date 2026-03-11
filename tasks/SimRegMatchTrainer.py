@@ -350,19 +350,6 @@ class SimRegMatchTrainer(object):
                 self.args.valid_mae = str(mae)
                 self.args.valid_rmse = str(rmse)
                 
-                labels_total, preds_total = labels_total.numpy(), preds_total.numpy()
-                
-                # For pixel-wise predictions, flatten to save as CSV
-                if labels_total.ndim > 2:  # Pixel-wise (B, C, H, W)
-                    labels_total = labels_total.reshape(-1)  # Flatten all dimensions
-                    preds_total = preds_total.reshape(-1)
-
-                labels_total, preds_total = pd.DataFrame(labels_total), pd.DataFrame(preds_total)
-                df = pd.concat([labels_total, preds_total], axis=1)
-                df.columns = ['Real', 'Pred']
-                
-                df.to_csv(os.path.join(self.result_dir, f'valid_{str(epoch)}.csv'), index=False)
-                
                 # Save best model state dict (for inference)
                 # Remove 'module.' prefix if model is wrapped in DataParallel
                 model_state = self.model.state_dict()

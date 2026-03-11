@@ -154,8 +154,8 @@ class So2Sat_POP_Unlabeled(Dataset):
         # regardless of original image size.
         img = TF.resize(img, (self.img_size, self.img_size))
         
-        # Apply RandAugment on resized image
-        rand_aug = RandAug.RandAugmentPC(n=2, m=10, img_size=self.img_size, grayscale=use_grayscale_aug)
+        # Apply RandAugment on resized image (n=3 so color/geometric mix is more visible)
+        rand_aug = RandAug.RandAugmentPC(n=3, m=10, img_size=self.img_size, grayscale=use_grayscale_aug)
         img = rand_aug(img)
         
         # Convert to tensor and normalize

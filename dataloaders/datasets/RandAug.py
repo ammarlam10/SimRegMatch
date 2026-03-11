@@ -175,23 +175,17 @@ def grayscale_augment_pool():
 
 
 def my_augment_pool():
-    # Test
+    # Pixel-wise regression augmentation pool (color/appearance only, no geometric transforms)
+    # Removed: Cutout, ShearX/Y, Invert, Solarize/SolarizeAdd, Rotate, TranslateX/Y
+    # Geometric transforms (crop, flip, rotate) are handled by shared parameters to maintain RGB-nDSM alignment
     augs = [(AutoContrast, None, None),
             (Brightness, 1.8, 0.1),
             (Color, 1.8, 0.1),
             (Contrast, 1.8, 0.1),
-            (Cutout, 0.2, 0),
             (Equalize, None, None),
-            (Invert, None, None),
             (Posterize, 4, 4),
-            (Rotate, 30, 0),
             (Sharpness, 1.8, 0.1),
-            (ShearX, 0.3, 0),
-            (ShearY, 0.3, 0),
-            (Solarize, 256, 0),
-            (SolarizeAdd, 110, 0),
-            (TranslateX, 0.45, 0),
-            (TranslateY, 0.45, 0)]
+            (Identity, None, None)]
     return augs
 
 
@@ -214,22 +208,25 @@ def my_grayscale_augment_pool():
 
 
 class RandAugmentPC(object):
-    def __init__(self, n, m, img_size=32, grayscale=False):
+    def __init__(self, n, m, img_size=32, grayscale=False, use_cutout=True):
         assert n >= 1
         assert 1 <= m <= 10
         self.n = n
         self.m = m
         self.img_size = img_size
         self.cutout_size = int(img_size * 0.5)
+        self.use_cutout = use_cutout
         self.augment_pool = my_grayscale_augment_pool() if grayscale else my_augment_pool()
 
     def __call__(self, img):
         ops = random.choices(self.augment_pool, k=self.n)
         for op, max_v, bias in ops:
-            prob = np.random.uniform(0.2, 0.8)
-            if random.random() + prob >= 1:
-                img = op(img, v=self.m, max_v=max_v, bias=bias)
-        img = CutoutAbs(img, self.cutout_size)
+            # Always apply each chosen op (standard RandAugment behavior).
+            # Previously each op was applied only when random.random() + prob >= 1 (~50% chance),
+            # which made strong augmentation look weak and rarely show color/brightness.
+            img = op(img, v=self.m, max_v=max_v, bias=bias)
+        if self.use_cutout:
+            img = CutoutAbs(img, self.cutout_size)
         return img
 
 

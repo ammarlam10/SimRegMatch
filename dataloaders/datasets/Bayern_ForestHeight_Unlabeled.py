@@ -60,6 +60,30 @@ class Bayern_ForestHeight_Unlabeled(Dataset):
 
     def __len__(self):
         return len(self.df)
+    
+    def _generate_geometric_params(self, rgb_pil):
+        """Generate shared geometric transformation parameters for both weak and strong augmentations."""
+        params = {}
+        
+        if self.split == 'train':
+            # Random crop parameters (for weak augmentation)
+            padded_size = self.img_size + 32  # 16 padding on each side
+            params['crop_i'], params['crop_j'], params['crop_h'], params['crop_w'] = \
+                transforms.RandomCrop.get_params(
+                    TF.pad(rgb_pil, 16), 
+                    (self.img_size, self.img_size)
+                )
+            
+            # Random flip parameters (shared by both weak and strong)
+            params['hflip'] = torch.rand(1) > 0.5
+            params['vflip'] = torch.rand(1) > 0.5
+        else:
+            params['crop_i'] = params['crop_j'] = 0
+            params['crop_h'] = params['crop_w'] = self.img_size
+            params['hflip'] = False
+            params['vflip'] = False
+        
+        return params
 
     def __getitem__(self, index):
         index = index % len(self.df)
@@ -83,11 +107,14 @@ class Bayern_ForestHeight_Unlabeled(Dataset):
         # nDSM: float32
         ndsm = ndsm.squeeze(-1)  # (256, 256)
         
+        # Generate shared geometric transform parameters
+        geometric_params = self._generate_geometric_params(rgb_pil)
+        
         # Weak augmentation
-        weak_rgb, weak_ndsm = self.apply_weak_transforms(rgb_pil, ndsm)
+        weak_rgb, weak_ndsm = self.apply_weak_transforms(rgb_pil, ndsm, geometric_params)
         
         # Strong augmentation (RandAugment)
-        strong_rgb, strong_ndsm = self.apply_strong_transforms(rgb_pil, ndsm)
+        strong_rgb, strong_ndsm = self.apply_strong_transforms(rgb_pil, ndsm, geometric_params)
         
         # Compute mean height for this patch (for compatibility)
         label = np.asarray([np.mean(ndsm)]).astype('float32')
@@ -102,25 +129,31 @@ class Bayern_ForestHeight_Unlabeled(Dataset):
             'label': weak_ndsm.float()  # (1, 256, 256) - use weak aug for label
         }
 
-    def apply_weak_transforms(self, rgb_pil, ndsm_array):
-        """Apply weak augmentation (resize, random crop, random flip)."""
+    def apply_weak_transforms(self, rgb_pil, ndsm_array, geometric_params):
+        """Apply weak augmentation (resize, random crop, random flip) with shared geometric parameters."""
         # Resize (both)
         rgb_pil = TF.resize(rgb_pil, (self.img_size, self.img_size))
         ndsm_pil = Image.fromarray(ndsm_array.astype(np.float32), mode='F')
         ndsm_pil = TF.resize(ndsm_pil, (self.img_size, self.img_size), interpolation=Image.BILINEAR)
         
         if self.split == 'train':
-            # Random crop with padding (synchronized)
+            # Random crop with padding (synchronized using shared parameters)
             rgb_pil = TF.pad(rgb_pil, 16)
             ndsm_pil = TF.pad(ndsm_pil, 16, fill=0)
-            i, j, h, w = transforms.RandomCrop.get_params(rgb_pil, (self.img_size, self.img_size))
-            rgb_pil = TF.crop(rgb_pil, i, j, h, w)
-            ndsm_pil = TF.crop(ndsm_pil, i, j, h, w)
+            rgb_pil = TF.crop(rgb_pil, geometric_params['crop_i'], geometric_params['crop_j'], 
+                             geometric_params['crop_h'], geometric_params['crop_w'])
+            ndsm_pil = TF.crop(ndsm_pil, geometric_params['crop_i'], geometric_params['crop_j'],
+                              geometric_params['crop_h'], geometric_params['crop_w'])
             
-            # Random horizontal flip (synchronized)
-            if torch.rand(1) > 0.5:
+            # Random horizontal flip (synchronized using shared parameters)
+            if geometric_params['hflip']:
                 rgb_pil = TF.hflip(rgb_pil)
                 ndsm_pil = TF.hflip(ndsm_pil)
+            
+            # Random vertical flip (synchronized using shared parameters)
+            if geometric_params['vflip']:
+                rgb_pil = TF.vflip(rgb_pil)
+                ndsm_pil = TF.vflip(ndsm_pil)
         
         # Convert RGB to tensor
         rgb_tensor = TF.to_tensor(rgb_pil)  # (3, H, W) in [0, 1]
@@ -143,31 +176,39 @@ class Bayern_ForestHeight_Unlabeled(Dataset):
         
         return rgb_tensor, ndsm_tensor
 
-    def apply_strong_transforms(self, rgb_pil, ndsm_array):
+    def apply_strong_transforms(self, rgb_pil, ndsm_array, geometric_params):
         """
-        Apply strong augmentation (RandAugment + resize + normalize).
-        Color augmentations only applied to RGB, not nDSM.
+        Apply strong augmentation (RandAugment + resize + normalize) with shared geometric parameters.
+        Color augmentations only applied to RGB. Geometric transforms synchronized with weak augmentation.
         """
-        # Apply RandAugment to RGB only (with color augmentations)
-        rand_aug = RandAug.RandAugmentPC(n=2, m=10, img_size=self.img_size, grayscale=False)
-        rgb_pil_aug = rand_aug(rgb_pil)
-        
-        # For nDSM, apply only geometric transforms (no color)
+        # Resize first
+        rgb_pil = TF.resize(rgb_pil, (self.img_size, self.img_size))
         ndsm_pil = Image.fromarray(ndsm_array.astype(np.float32), mode='F')
-        
-        # Resize both
-        rgb_pil_aug = TF.resize(rgb_pil_aug, (self.img_size, self.img_size))
         ndsm_pil = TF.resize(ndsm_pil, (self.img_size, self.img_size), interpolation=Image.BILINEAR)
         
-        # Apply same geometric transforms to nDSM (simplified version)
         if self.split == 'train':
-            # Random horizontal flip
-            if torch.rand(1) > 0.5:
+            # Apply same random crop as weak augmentation (synchronized)
+            rgb_pil = TF.pad(rgb_pil, 16)
+            ndsm_pil = TF.pad(ndsm_pil, 16, fill=0)
+            rgb_pil = TF.crop(rgb_pil, geometric_params['crop_i'], geometric_params['crop_j'],
+                             geometric_params['crop_h'], geometric_params['crop_w'])
+            ndsm_pil = TF.crop(ndsm_pil, geometric_params['crop_i'], geometric_params['crop_j'],
+                              geometric_params['crop_h'], geometric_params['crop_w'])
+            
+            # Apply same flips as weak augmentation (synchronized)
+            if geometric_params['hflip']:
+                rgb_pil = TF.hflip(rgb_pil)
                 ndsm_pil = TF.hflip(ndsm_pil)
             
-            # Random vertical flip
-            if torch.rand(1) > 0.5:
+            if geometric_params['vflip']:
+                rgb_pil = TF.vflip(rgb_pil)
                 ndsm_pil = TF.vflip(ndsm_pil)
+        
+        # Apply RandAugment to RGB only (color augmentations + additional geometric variations)
+        # Note: RandAugment may apply additional geometric transforms on top of the shared ones
+        # Disable Cutout for pixel-wise regression to maintain RGB-nDSM correspondence
+        rand_aug = RandAug.RandAugmentPC(n=2, m=10, img_size=self.img_size, grayscale=False, use_cutout=False)
+        rgb_pil_aug = rand_aug(rgb_pil)
         
         # Convert RGB to tensor
         rgb_tensor = TF.to_tensor(rgb_pil_aug)  # (3, H, W) in [0, 1]

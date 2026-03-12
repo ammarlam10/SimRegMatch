@@ -21,7 +21,11 @@ def main():
     
     for epoch in range(start_epoch, args.epochs+1, 1):
         trainer.train(epoch)
-        if epoch <= 5 or epoch % 10 == 0:
+        # Population dataset: validate every 5 epochs; others: every 10 (and first 5)
+        run_valid = (epoch <= 5) or (
+            (epoch % 5 == 0) if args.dataset.lower() == 'so2sat_pop' else (epoch % 10 == 0)
+        )
+        if run_valid:
             trainer.validation(epoch)
     
     trainer.inference(epoch)

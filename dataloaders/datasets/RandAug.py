@@ -214,7 +214,7 @@ class RandAugmentPC(object):
         self.n = n
         self.m = m
         self.img_size = img_size
-        self.cutout_size = int(img_size * 0.5)
+        self.cutout_size = int(img_size * 0.25)
         self.use_cutout = use_cutout
         self.augment_pool = my_grayscale_augment_pool() if grayscale else my_augment_pool()
 

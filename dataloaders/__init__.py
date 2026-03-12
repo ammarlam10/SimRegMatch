@@ -200,18 +200,13 @@ def make_semi_loader(args, num_workers=12):
     label_mean = None
     label_std = None
     if args.normalize_labels:
-        # Use fixed normalization values for so2sat_pop dataset
-        if args.dataset.lower() == 'so2sat_pop':
-            label_mean = 1085.0
-            label_std = 2800.0
-            print(f"Using fixed normalization for so2sat_pop: mean={label_mean}, std={label_std}")
-        else:
-            label_mean = float(df_labeled['age'].mean())
-            label_std = float(df_labeled['age'].std())
-            # Avoid division by zero
-            if label_std < 1e-6:
-                label_std = 1.0
-            print(f"Label normalization enabled: mean={label_mean:.2f}, std={label_std:.2f}")
+        # Compute normalization from actual labeled data
+        label_mean = float(df_labeled['age'].mean())
+        label_std = float(df_labeled['age'].std())
+        # Avoid division by zero
+        if label_std < 1e-6:
+            label_std = 1.0
+        print(f"Label normalization enabled: mean={label_mean:.2f}, std={label_std:.2f}")
         print(f"Label range: [{df_labeled['age'].min():.2f}, {df_labeled['age'].max():.2f}]")
     else:
         print("Label normalization disabled (using raw labels)")
